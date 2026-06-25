@@ -16,6 +16,10 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 
 import zstandard as zstd
+import mcp_server as _mcp
+
+# Matches "路径: <path>" in decode_file_message output (mcp_server still uses Chinese)
+_PATH_LINE = re.compile(r"路径:\s*(.+)")
 
 # Set Windows PowerShell console to UTF-8
 if sys.platform == "win32":
@@ -31,7 +35,7 @@ OUTPUT_DIR = _cfg["output_base_dir"]
 # Image-related configuration
 WECHAT_BASE_DIR = _cfg.get("wechat_base_dir", "")
 ATTACH_DIR = os.path.join(WECHAT_BASE_DIR, "msg", "attach") if WECHAT_BASE_DIR else ""
-MSGATTACH_DIR = _cfg.get("msgattach_dir", "")  # WeChat Files/FileStorage/MsgAttach
+MSGATTACH_DIR = _cfg.get("msgattach_dir", "")
 IMAGE_AES_KEY = _cfg.get("image_aes_key")
 IMAGE_XOR_KEY = _cfg.get("image_xor_key", 0x88)
 MSG_RESOURCE_DB = os.path.join(_cfg["decrypted_dir"], "message", "message_resource.db")
@@ -331,6 +335,35 @@ def decode_chat_images(chat_username, _messages_unused, out_dir):
 
     return image_map
 
+
+def _resolve_voice(chat_username: str, local_id: int, create_time: int):
+    """Decode a voice message to WAV via mcp_server and return abs path, or None."""
+    try:
+        row = _mcp._fetch_voice_row(chat_username, local_id)
+        if row is None:
+            return None
+        voice_data, ct = row
+        out_path, _ = _mcp._silk_to_wav(voice_data, ct, chat_username, local_id)
+        return out_path if out_path and os.path.exists(out_path) else None
+    except Exception:
+        return None
+
+
+def _resolve_file(chat_username: str, local_id: int, create_time: int):
+    """Locate a file attachment via mcp_server.decode_file_message and return abs path, or None."""
+    try:
+        out = _mcp.decode_file_message(chat_username, local_id, create_time or 0)
+    except Exception:
+        return None
+    if not isinstance(out, str) or "找到本地文件" not in out:
+        return None
+    m = _PATH_LINE.search(out)
+    if not m:
+        return None
+    path = m.group(1).strip()
+    return path if os.path.exists(path) else None
+
+
 MSG_TYPES = {
     1: "Text",
     3: "Image",
@@ -434,6 +467,9 @@ body{{background:#ededed;font-family:"Helvetica Neue",Arial,sans-serif;font-size
 .received .bubble{{background:#fff;border-radius:0 6px 6px 6px}}
 .sent .bubble{{background:#95EC69;border-radius:6px 0 6px 6px}}
 .bubble img{{max-width:100%;border-radius:4px;display:block;margin:2px 0}}
+.bubble audio{{max-width:260px;width:100%;margin:2px 0;vertical-align:middle}}
+.bubble a{{color:#0a84ff;text-decoration:none;word-break:break-all}}
+.bubble a:hover{{text-decoration:underline}}
 .type-tag{{font-size:11px;color:#aaa;margin-top:2px}}
 </style>
 </head>
@@ -449,7 +485,7 @@ body{{background:#ededed;font-family:"Helvetica Neue",Arial,sans-serif;font-size
 def _html_escape(s: str) -> str:
     return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"','&quot;')
 
-def _write_html(path: str, title: str, is_group: bool, messages: list, image_map: dict = None, out_dir: str = None):
+def _write_html(path: str, title: str, is_group: bool, messages: list, image_map: dict = None, out_dir: str = None, voice_map: dict = None, file_map: dict = None):
     parts = []
     last_date = None
     for m in messages:
@@ -476,7 +512,7 @@ def _write_html(path: str, title: str, is_group: bool, messages: list, image_map
         if m["type"] != 1:
             type_tag = f'<div class="type-tag">{m["type_name"]}</div>'
 
-        # Embed image message
+        # Render attachment-aware bubble content
         bubble_content = _html_escape(m["display_content"])
         if m["type"] == 3 and image_map and m["local_id"] in image_map:
             rel_path = image_map[m["local_id"]]
@@ -496,6 +532,20 @@ def _write_html(path: str, title: str, is_group: bool, messages: list, image_map
                     bubble_content = f'<img src=\"{_html_escape(rel_path)}\" alt=\"Image\">'
             else:
                 bubble_content = f'<img src=\"{_html_escape(rel_path)}\" alt=\"Image\">'
+        elif m["type"] == 34 and voice_map and m["local_id"] in voice_map:
+            abs_path = voice_map[m["local_id"]]
+            href = _html_escape("file:///" + abs_path.replace("\\", "/"))
+            bubble_content = (
+                f'<audio controls>'
+                f'<source src=\"{href}\" type=\"audio/wav\">'
+                f'[Voice message]</audio>'
+                f'<br><small style=\"color:#888\">{_html_escape(abs_path)}</small>'
+            )
+        elif m["type"] == 49 and file_map and m["local_id"] in file_map:
+            abs_path = file_map[m["local_id"]]
+            label = _html_escape(m["display_content"])
+            href = _html_escape("file:///" + abs_path.replace("\\", "/"))
+            bubble_content = f'<a href=\"{href}\">{label}</a><br><small style=\"color:#888\">{_html_escape(abs_path)}</small>'
 
         parts.append(
             f'<div class="msg {side}">'
@@ -603,14 +653,16 @@ for db_path in sorted(db_files):
             content = get_content(raw_content, ct_flag or 0)
             sender_uname = sender_map.get(real_sender_id, "")
             sender_dn = display_name(sender_uname) if sender_uname else "Me"
-            msg_type_name = MSG_TYPES.get(local_type, f"Unknown({local_type})")
-            display_content = friendly_content(local_type, content)
-            is_system = local_type in (10000, 10002)
+            # WeChat packs an appmsg subtype into the high 32 bits; normalise to base type.
+            base_type = local_type & 0xFFFFFFFF if local_type > 0xFFFFFFFF else local_type
+            msg_type_name = MSG_TYPES.get(base_type, f"Unknown({base_type})")
+            display_content = friendly_content(base_type, content)
+            is_system = base_type in (10000, 10002)
 
             messages.append({
                 "local_id": local_id,
                 "server_id": server_id,
-                "type": local_type,
+                "type": base_type,
                 "type_name": msg_type_name,
                 "sort_seq": sort_seq,
                 "sender_username": sender_uname,
@@ -664,7 +716,7 @@ for chat_username, cdata in chat_data.items():
 
     # ── Write message files per DB ───────────────────────────────────────
     for db_name, messages in cdata["db_messages"]:
-        # Build local_id -> rel_path mapping
+        # Build local_id -> rel_path mapping for images and voice
         image_map = {}
         if image_md5_map:
             for m in messages:
@@ -675,17 +727,41 @@ for chat_username, cdata in chat_data.items():
                 if file_md5 and file_md5 in image_md5_map:
                     image_map[lid] = image_md5_map[file_md5]
 
+        # Resolve voice and file attachment paths via mcp_server (same approach as link_attachments.py)
+        voice_map = {}  # local_id -> abs_path (WAV)
+        file_map = {}   # local_id -> abs_path
+        for m in messages:
+            if m["type"] == 34:
+                path = _resolve_voice(chat_username, m["local_id"], m["create_time"])
+                if path:
+                    voice_map[m["local_id"]] = path
+            elif m["type"] == 49:
+                path = _resolve_file(chat_username, m["local_id"], m["create_time"])
+                if path:
+                    file_map[m["local_id"]] = path
+
+        # Stamp attachment_path (absolute) onto each message dict for CSV/JSON.
+        # HTML uses image_map/voice_map/file_map directly (relative paths for img/audio).
+        for m in messages:
+            if m["type"] == 3 and m["local_id"] in image_map:
+                m["attachment_path"] = os.path.abspath(os.path.join(out_dir, image_map[m["local_id"]]))
+            elif m["type"] == 34 and m["local_id"] in voice_map:
+                m["attachment_path"] = voice_map[m["local_id"]]
+            elif m["type"] == 49 and m["local_id"] in file_map:
+                m["attachment_path"] = file_map[m["local_id"]]
+            else:
+                m.pop("attachment_path", None)
+
         # ── CSV ───────────────────────────────────────────────────────────
         if not _EXPORT_FORMATS or "csv" in _EXPORT_FORMATS:
             csv_path = os.path.join(out_dir, f"{db_name}.csv")
             with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
-                w.writerow(["Time", "Sender", "Message Type", "Content", "Image Path", "server_id"])
+                w.writerow(["Time", "Sender", "Message Type", "Content", "Attachment Path", "server_id"])
                 for m in messages:
-                    img_path = image_map.get(m["local_id"], "") if m["type"] == 3 else ""
                     w.writerow([
                         m["time_str"], m["sender"], m["type_name"],
-                        m["display_content"], img_path, m["server_id"]
+                        m["display_content"], m.get("attachment_path", ""), m["server_id"]
                     ])
 
         # ── JSON ──────────────────────────────────────────────────────────
@@ -703,7 +779,7 @@ for chat_username, cdata in chat_data.items():
         # ── HTML ──────────────────────────────────────────────────────────
         if not _EXPORT_FORMATS or "html" in _EXPORT_FORMATS:
             html_path = os.path.join(out_dir, f"{db_name}.html")
-            _write_html(html_path, dname, is_group, messages, image_map=image_map, out_dir=out_dir)
+            _write_html(html_path, dname, is_group, messages, image_map=image_map, out_dir=out_dir, voice_map=voice_map, file_map=file_map)
 
         total_chats += 1
         total_msgs += len(messages)
