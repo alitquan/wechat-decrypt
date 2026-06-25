@@ -415,6 +415,24 @@ def xml_extract(content: str, *tags) -> str:
             return m.group(1).strip()
     return content[:200]
 
+def extract_appmsg_meta(content: str) -> dict:
+    """Extract structured metadata from a type=49 appmsg XML payload."""
+    meta = {}
+    for tag, key in [("title", "filename"), ("fileext", "file_ext"),
+                     ("totallen", "file_size_bytes"), ("attachid", "wechat_attach_id"),
+                     ("appid", "appid"), ("type", "appmsg_subtype")]:
+        val = xml_extract(content, tag) if f"<{tag}>" in content or f'<{tag} ' in content else ""
+        if val and val != content[:200]:  # skip fallback full-content returns
+            meta[key] = val
+    # Convert size to int if present
+    if "file_size_bytes" in meta:
+        try:
+            meta["file_size_bytes"] = int(meta["file_size_bytes"])
+        except ValueError:
+            pass
+    return meta
+
+
 def friendly_content(msg_type: int, content: str) -> str:
     """Return a display-friendly content summary"""
     if msg_type == 1:
@@ -435,7 +453,10 @@ def friendly_content(msg_type: int, content: str) -> str:
         return f"[Location: {loc}]"
     if msg_type == 49:
         title = xml_extract(content, "title")
-        return f"[Share: {title}]" if title else "[File/Link]"
+        fileext = xml_extract(content, "fileext") if "<fileext>" in content else ""
+        if title and fileext and not title.lower().endswith("." + fileext.lower()):
+            title = f"{title}.{fileext}"
+        return f"[File: {title}]" if title else "[File/Link]"
     if msg_type in (10000, 10002):
         return f"[System: {content[:100]}]"
     return content[:200]
@@ -541,11 +562,27 @@ def _write_html(path: str, title: str, is_group: bool, messages: list, image_map
                 f'[Voice message]</audio>'
                 f'<br><small style=\"color:#888\">{_html_escape(abs_path)}</small>'
             )
-        elif m["type"] == 49 and file_map and m["local_id"] in file_map:
-            abs_path = file_map[m["local_id"]]
+        elif m["type"] == 49:
+            meta = m.get("appmsg_meta", {})
             label = _html_escape(m["display_content"])
-            href = _html_escape("file:///" + abs_path.replace("\\", "/"))
-            bubble_content = f'<a href=\"{href}\">{label}</a><br><small style=\"color:#888\">{_html_escape(abs_path)}</small>'
+            lines = []
+            if file_map and m["local_id"] in file_map:
+                abs_path = file_map[m["local_id"]]
+                href = _html_escape("file:///" + abs_path.replace("\\", "/"))
+                lines.append(f'<a href=\"{href}\">{label}</a>')
+                lines.append(f'<small style=\"color:#888\">Absolute: {_html_escape(abs_path)}</small>')
+                rel_path = m.get("attachment_path_relative", "")
+                if rel_path:
+                    lines.append(f'<small style=\"color:#aaa\">Relative: {_html_escape(rel_path)}</small>')
+            else:
+                lines.append(label)
+            if meta.get("file_size_bytes"):
+                size = meta["file_size_bytes"]
+                size_str = f"{size:,} bytes" if size < 1024*1024 else f"{size/1024/1024:.1f} MB"
+                lines.append(f'<small style=\"color:#aaa\">Size: {size_str}</small>')
+            if meta.get("wechat_attach_id"):
+                lines.append(f'<small style=\"color:#aaa\">WeChat ID: {_html_escape(meta["wechat_attach_id"])}</small>')
+            bubble_content = "<br>".join(lines)
 
         parts.append(
             f'<div class="msg {side}">'
@@ -674,6 +711,7 @@ for db_path in sorted(db_files):
                 "display_content": display_content,
                 "is_system": is_system,
                 "is_received": (sender_uname == chat_username) if not is_group else True,
+                **({"appmsg_meta": extract_appmsg_meta(content)} if base_type == 49 and content else {}),
             })
 
         if chat_username not in chat_data:
@@ -740,28 +778,47 @@ for chat_username, cdata in chat_data.items():
                 if path:
                     file_map[m["local_id"]] = path
 
-        # Stamp attachment_path (absolute) onto each message dict for CSV/JSON.
-        # HTML uses image_map/voice_map/file_map directly (relative paths for img/audio).
+        # Stamp attachment_path (absolute) and attachment_path_relative onto each message.
+        # Relative path is relative to out_dir — portable if the whole export folder is moved.
         for m in messages:
             if m["type"] == 3 and m["local_id"] in image_map:
-                m["attachment_path"] = os.path.abspath(os.path.join(out_dir, image_map[m["local_id"]]))
+                rel = image_map[m["local_id"]]  # already relative to out_dir
+                m["attachment_path"] = os.path.abspath(os.path.join(out_dir, rel))
+                m["attachment_path_relative"] = rel.replace("\\", "/")
             elif m["type"] == 34 and m["local_id"] in voice_map:
-                m["attachment_path"] = voice_map[m["local_id"]]
+                abs_p = voice_map[m["local_id"]]
+                m["attachment_path"] = abs_p
+                try:
+                    m["attachment_path_relative"] = os.path.relpath(abs_p, out_dir).replace("\\", "/")
+                except ValueError:
+                    m["attachment_path_relative"] = ""
             elif m["type"] == 49 and m["local_id"] in file_map:
-                m["attachment_path"] = file_map[m["local_id"]]
+                abs_p = file_map[m["local_id"]]
+                m["attachment_path"] = abs_p
+                try:
+                    m["attachment_path_relative"] = os.path.relpath(abs_p, out_dir).replace("\\", "/")
+                except ValueError:
+                    m["attachment_path_relative"] = ""
             else:
                 m.pop("attachment_path", None)
+                m.pop("attachment_path_relative", None)
 
         # ── CSV ───────────────────────────────────────────────────────────
         if not _EXPORT_FORMATS or "csv" in _EXPORT_FORMATS:
             csv_path = os.path.join(out_dir, f"{db_name}.csv")
             with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
-                w.writerow(["Time", "Sender", "Message Type", "Content", "Attachment Path", "server_id"])
+                w.writerow(["Time", "Sender", "Message Type", "Content",
+                            "Attachment Path (Absolute)", "Attachment Path (Relative)",
+                            "File Size (bytes)", "WeChat Attach ID", "server_id", "local_id"])
                 for m in messages:
+                    meta = m.get("appmsg_meta", {})
                     w.writerow([
                         m["time_str"], m["sender"], m["type_name"],
-                        m["display_content"], m.get("attachment_path", ""), m["server_id"]
+                        m["display_content"],
+                        m.get("attachment_path", ""), m.get("attachment_path_relative", ""),
+                        meta.get("file_size_bytes", ""), meta.get("wechat_attach_id", ""),
+                        m["server_id"], m["local_id"],
                     ])
 
         # ── JSON ──────────────────────────────────────────────────────────
