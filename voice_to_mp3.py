@@ -1,4 +1,4 @@
-"""从 media_0.db 提取所有语音数据，按用户名分目录，SILK_V3 转 MP3"""
+"""Extract all voice data from media_0.db, organized into directories by username, SILK_V3 converted to MP3"""
 import sqlite3
 import subprocess
 import tempfile
@@ -12,15 +12,15 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 try:
     import pilk
 except ImportError:
-    print("[ERROR] 缺少 pilk 库 (SILK 解码必需)", file=sys.stderr)
-    print("        请运行: pip install pilk", file=sys.stderr)
-    print("        然后重新启动本任务", file=sys.stderr)
+    print("[ERROR] Missing pilk library (required for SILK decoding)", file=sys.stderr)
+    print("        Please run: pip install pilk", file=sys.stderr)
+    print("        Then restart this task", file=sys.stderr)
     sys.exit(1)
 
 import shutil as _shutil
 if not _shutil.which("ffmpeg"):
-    print("[ERROR] ffmpeg 不在 PATH 中 (MP3 编码必需)", file=sys.stderr)
-    print("        Windows: https://ffmpeg.org/download.html 下载后加入 PATH", file=sys.stderr)
+    print("[ERROR] ffmpeg is not in PATH (required for MP3 encoding)", file=sys.stderr)
+    print("        Windows: https://ffmpeg.org/download.html  download and add to PATH", file=sys.stderr)
     print("        macOS:   brew install ffmpeg", file=sys.stderr)
     print("        Linux:   apt install ffmpeg / yum install ffmpeg", file=sys.stderr)
     sys.exit(1)
@@ -36,21 +36,21 @@ _CONTACT_FILTER = None
 _filter_raw = os.environ.get("WECHAT_EXPORT_CONTACTS", "").strip()
 if _filter_raw:
     _CONTACT_FILTER = set(_filter_raw.split(","))
-    print(f"联系人筛选: {len(_CONTACT_FILTER)} 个")
+    print(f"Contact filter: {len(_CONTACT_FILTER)} entries")
 
 def silk_to_mp3(voice_data, output_path):
-    """将微信 SILK 语音数据转换为 MP3"""
-    # 去掉微信格式的 0x02 前缀
+    """Convert WeChat SILK voice data to MP3"""
+    # Strip the WeChat-format 0x02 prefix
     if voice_data[0:1] == b'\x02':
         silk_data = voice_data[1:]
     else:
         silk_data = voice_data
 
     if not silk_data.startswith(b'#!SILK_V3'):
-        print(f"  警告：数据不以 #!SILK_V3 开头，跳过")
+        print(f"  Warning: data does not start with #!SILK_V3, skipping")
         return False
 
-    # 补上结尾标记
+    # Append end-of-stream marker
     if not silk_data.endswith(b'\xff\xff'):
         silk_data += b'\xff\xff'
 
@@ -73,14 +73,14 @@ def silk_to_mp3(voice_data, output_path):
         if os.path.exists(pcm_file):
             os.remove(pcm_file)
 
-# 1. 读取 Name2Id 映射 (rowid -> user_name)
+# 1. Read Name2Id mapping (rowid -> user_name)
 conn = sqlite3.connect(DB_PATH)
 name_map = {}
 for rowid, user_name in conn.execute("SELECT rowid, user_name FROM Name2Id"):
     name_map[rowid] = user_name
-print(f"共 {len(name_map)} 个用户")
+print(f"Total {len(name_map)} users")
 
-# 2. 读取 contact 信息 (user_name -> {remark, nick_name, alias, ...})
+# 2. Read contact info (user_name -> {remark, nick_name, alias, ...})
 contact_map = {}
 try:
     cconn = sqlite3.connect(CONTACT_DB_PATH)
@@ -88,27 +88,27 @@ try:
         uname, alias, remark, nick_name = row
         contact_map[uname] = {"username": uname, "alias": alias or "", "remark": remark or "", "nick_name": nick_name or ""}
     cconn.close()
-    print(f"联系人数据库加载: {len(contact_map)} 条")
+    print(f"Contact database loaded: {len(contact_map)} records")
 except Exception as e:
-    print(f"联系人数据库读取失败: {e}")
+    print(f"Failed to read contact database: {e}")
 
 def display_name(user_name):
-    """优先 remark > nick_name > user_name"""
+    """Priority: remark > nick_name > user_name"""
     info = contact_map.get(user_name, {})
     return info.get("remark") or info.get("nick_name") or user_name
 
 def safe_dirname(name):
-    """替换目录名中的非法字符"""
+    """Replace illegal characters in directory names"""
     for ch in r'\/:*?"<>|':
         name = name.replace(ch, "_")
     return name.strip() or "unknown"
 
-# 2. 查询所有语音，按 chat_name_id 关联用户名
+# 2. Query all voice records, join user_name via chat_name_id
 rows = conn.execute("SELECT chat_name_id, create_time, local_id, voice_data FROM VoiceInfo ORDER BY chat_name_id, create_time").fetchall()
 conn.close()
-print(f"共 {len(rows)} 条语音")
+print(f"Total {len(rows)} voice records")
 
-# 3. 遍历转换
+# 3. Iterate and convert
 success = 0
 fail = 0
 for chat_name_id, create_time, local_id, voice_data in rows:
@@ -122,7 +122,7 @@ for chat_name_id, create_time, local_id, voice_data in rows:
     user_dir = os.path.join(OUTPUT_DIR, dname, "voice")
     os.makedirs(user_dir, exist_ok=True)
 
-    # 写入 .info 文件（只写一次，写到联系人根目录）
+    # Write .info file (written once, placed in the contact root directory)
     info_path = os.path.join(OUTPUT_DIR, dname, ".info")
     if not os.path.exists(info_path):
         info = contact_map.get(user_name, {"username": user_name, "alias": "", "remark": "", "nick_name": ""})
@@ -143,6 +143,6 @@ for chat_name_id, create_time, local_id, voice_data in rows:
         print(f"  [{success}/{len(rows)}] {dname}/{filename}")
     else:
         fail += 1
-        print(f"  失败: {dname}/{filename}")
+        print(f"  Failed: {dname}/{filename}")
 
-print(f"\n完成: 成功 {success}, 失败 {fail}")
+print(f"\nDone: {success} succeeded, {fail} failed")

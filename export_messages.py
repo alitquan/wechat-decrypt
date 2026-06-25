@@ -1,6 +1,6 @@
-"""导出微信消息记录到 CSV / HTML / JSON
-目录结构: <output_base_dir>/<display_name>/messages.csv|html|json
-图片导出: <output_base_dir>/<display_name>/image/<md5>.<ext>
+"""Export WeChat message records to CSV / HTML / JSON
+Directory structure: <output_base_dir>/<display_name>/messages.csv|html|json
+Image export: <output_base_dir>/<display_name>/image/<md5>.<ext>
 """
 import base64
 import sqlite3
@@ -17,7 +17,7 @@ from datetime import datetime
 
 import zstandard as zstd
 
-# Windows PowerShell 控制台设为 UTF-8
+# Set Windows PowerShell console to UTF-8
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -28,7 +28,7 @@ MSG_DB_DIR = os.path.join(_cfg["decrypted_dir"], "message")
 CONTACT_DB_PATH = os.path.join(_cfg["decrypted_dir"], "contact", "contact.db")
 OUTPUT_DIR = _cfg["output_base_dir"]
 
-# 图片相关配置
+# Image-related configuration
 WECHAT_BASE_DIR = _cfg.get("wechat_base_dir", "")
 ATTACH_DIR = os.path.join(WECHAT_BASE_DIR, "msg", "attach") if WECHAT_BASE_DIR else ""
 MSGATTACH_DIR = _cfg.get("msgattach_dir", "")  # WeChat Files/FileStorage/MsgAttach
@@ -40,21 +40,21 @@ _CONTACT_FILTER = None
 _filter_raw = os.environ.get("WECHAT_EXPORT_CONTACTS", "").strip()
 if _filter_raw:
     _CONTACT_FILTER = set(_filter_raw.split(","))
-    print(f"联系人筛选: {len(_CONTACT_FILTER)} 个")
+    print(f"Contact filter: {len(_CONTACT_FILTER)} contacts")
 
 _EXPORT_FORMATS = None
 _formats_raw = os.environ.get("WECHAT_EXPORT_FORMATS", "").strip()
 if _formats_raw:
     _EXPORT_FORMATS = set(_formats_raw.lower().split(","))
-    print(f"导出格式: {', '.join(sorted(_EXPORT_FORMATS))}")
+    print(f"Export formats: {', '.join(sorted(_EXPORT_FORMATS))}")
 
 _EXPORT_IMAGES = os.environ.get("WECHAT_EXPORT_IMAGES", "1").strip() == "1"
 
 
-# ─── 图片解密辅助 ───────────────────────────────────────────────────────────────
+# ─── Image decryption helpers ──────────────────────────────────────────────────
 
 def _extract_md5_from_packed_info(blob):
-    """从 message_resource.db 的 packed_info 中提取文件 MD5"""
+    """Extract file MD5 from packed_info in message_resource.db"""
     if not blob or not isinstance(blob, bytes):
         return None
     marker = b'\x12\x22\x0a\x20'
@@ -84,13 +84,13 @@ def _extract_md5_from_packed_info(blob):
 
 
 def _load_resource_md5_map():
-    """加载 message_resource.db 的 (chat_username, local_id) -> file_md5 映射"""
+    """Load (chat_username, local_id) -> file_md5 mapping from message_resource.db"""
     md5_map = {}
     if not os.path.exists(MSG_RESOURCE_DB):
         return md5_map
     try:
         conn = sqlite3.connect(MSG_RESOURCE_DB)
-        # chat_id -> username
+        # chat_id -> username mapping
         chat_id_map = {}
         for row in conn.execute("SELECT rowid, user_name FROM ChatName2Id"):
             chat_id_map[row[0]] = row[1]
@@ -104,21 +104,21 @@ def _load_resource_md5_map():
                 if uname:
                     md5_map[(uname, lid)] = md5
         conn.close()
-        print(f"图片资源映射: {len(md5_map)} 条")
+        print(f"Image resource map: {len(md5_map)} entries")
     except Exception as e:
-        print(f"读取 message_resource.db 失败: {e}")
+        print(f"Failed to read message_resource.db: {e}")
     return md5_map
 
 
 def _find_dat_file(username_hash, file_md5):
-    """在 attach / MsgAttach 目录下查找 .dat 文件，优先高清版"""
+    """Search for .dat files in the attach / MsgAttach directory, preferring high-resolution versions"""
     search_patterns = []
-    # xwechat_files 的 msg/attach 目录: <hash>/<YYYY-MM>/Img/<md5>*.dat
+    # xwechat_files msg/attach directory: <hash>/<YYYY-MM>/Img/<md5>*.dat
     if ATTACH_DIR and os.path.isdir(ATTACH_DIR):
         search_base = os.path.join(ATTACH_DIR, username_hash)
         if os.path.isdir(search_base):
             search_patterns.append(os.path.join(search_base, "*", "Img", f"{file_md5}*.dat"))
-    # WeChat Files 的 MsgAttach 目录: <hash>/Image/<YYYY-MM>/<md5>*.dat
+    # WeChat Files MsgAttach directory: <hash>/Image/<YYYY-MM>/<md5>*.dat
     if MSGATTACH_DIR and os.path.isdir(MSGATTACH_DIR):
         search_base = os.path.join(MSGATTACH_DIR, username_hash)
         if os.path.isdir(search_base):
@@ -129,14 +129,14 @@ def _find_dat_file(username_hash, file_md5):
         files.extend(glob.glob(pat))
     if not files:
         return None
-    # 优先: 无后缀(原图) > _W(原图) > _h(高清) > _t/_t_W(缩略图)
-    # 先过滤掉缩略图
+    # Priority: no suffix (original) > _W (original) > _h (high-res) > _t/_t_W (thumbnail)
+    # Filter out thumbnails first
     non_thumb = [f for f in files if '_t.' not in os.path.basename(f) and '_t_' not in os.path.basename(f)]
     candidates = non_thumb if non_thumb else files
     selected = candidates[0]
     for f in candidates:
         fname = os.path.basename(f)
-        # 精确匹配原图（无后缀）
+        # Exact match for original image (no suffix)
         if fname == f"{file_md5}.dat":
             return f
     for f in candidates:
@@ -150,7 +150,7 @@ def _find_dat_file(username_hash, file_md5):
 
 
 def _detect_image_format(header):
-    """根据解密后的文件头检测图片格式"""
+    """Detect image format from the decrypted file header"""
     if header[:3] == bytes([0xFF, 0xD8, 0xFF]):
         return 'jpg'
     if header[:4] == bytes([0x89, 0x50, 0x4E, 0x47]):
@@ -164,7 +164,7 @@ def _detect_image_format(header):
     return 'bin'
 
 
-# V2 格式常量
+# V2 format constants
 _V2_MAGIC_FULL = b'\x07\x08V2\x08\x07'
 _V1_MAGIC_FULL = b'\x07\x08V1\x08\x07'
 _IMAGE_MAGICS = {
@@ -176,14 +176,14 @@ _IMAGE_MAGICS = {
 
 
 def _decrypt_dat_to_bytes(dat_path):
-    """解密 .dat 文件，返回 (bytes, format) 或 (None, None)"""
+    """Decrypt a .dat file, returning (bytes, format) or (None, None)"""
     with open(dat_path, 'rb') as f:
         data = f.read()
     if len(data) < 15:
         return None, None
     head6 = data[:6]
 
-    # V2 / V1 格式
+    # V2 / V1 format
     if head6 in (_V2_MAGIC_FULL, _V1_MAGIC_FULL):
         aes_key = None
         if head6 == _V1_MAGIC_FULL:
@@ -214,7 +214,7 @@ def _decrypt_dat_to_bytes(dat_path):
         except Exception:
             return None, None
 
-    # 旧 XOR 格式
+    # Legacy XOR format
     for fmt_name, magic in _IMAGE_MAGICS.items():
         key = data[0] ^ magic[0]
         match = all(i < len(data) and (data[i] ^ key) == magic[i] for i in range(len(magic)))
@@ -230,15 +230,15 @@ _resource_md5_map = _load_resource_md5_map() if _EXPORT_IMAGES else {}
 
 
 def decode_chat_images(chat_username, _messages_unused, out_dir):
-    """直接扫描 attach 目录下该联系人的全部图片并解密
-    按月份分目录输出到 out_dir/image/<YYYY-MM>/
-    跳过 _t 缩略图，优先 _h 高清版
-    返回 {file_md5: relative_path} 用于 HTML 嵌入
+    """Directly scan all images for the contact in the attach directory and decrypt them.
+    Output to out_dir/image/<YYYY-MM>/ organized by month.
+    Skip _t thumbnails, prefer _h high-resolution versions.
+    Returns {file_md5: relative_path} for HTML embedding.
     """
     image_map = {}
     username_hash = hashlib.md5(chat_username.encode()).hexdigest()
 
-    # 收集所有来源目录: [(base_path, sub_structure), ...]
+    # Collect all source directories: [(base_path, sub_structure), ...]
     # xwechat: attach/<hash>/<YYYY-MM>/Img/<md5>*.dat
     # WeChat Files: MsgAttach/<hash>/Image/<YYYY-MM>/<md5>*.dat
     source_dirs = []
@@ -254,24 +254,24 @@ def decode_chat_images(chat_username, _messages_unused, out_dir):
     if not source_dirs:
         return image_map
 
-    # 收集所有 dat 文件: {base_md5: (best_path, month)}
-    # 优先级: _h > 无后缀 > _W > 其他（跳过 _t）
+    # Collect all dat files: {base_md5: (best_path, month)}
+    # Priority: _h > no suffix > _W > other (skip _t)
     file_candidates = {}  # base_md5 -> (priority, dat_path, month)
 
     def _priority(fname):
-        """返回优先级数字，越小越好"""
+        """Return a priority number; lower is better"""
         base = fname.rsplit('.', 1)[0]
         if base.endswith('_h'):
-            return 0  # 高清
+            return 0  # high-resolution
         if '_' not in base[-3:]:
-            return 1  # 无后缀原图
+            return 1  # original (no suffix)
         if base.endswith('_W'):
             return 2
-        return 9  # 其他
+        return 9  # other
 
     for src_type, base_path in source_dirs:
-        # xwechat: <hash>/<YYYY-MM>/Img/  — 直接列 base_path 得到月份
-        # wechat:  <hash>/Image/<YYYY-MM>/ — 需要列 base_path/Image 得到月份
+        # xwechat: <hash>/<YYYY-MM>/Img/  — list base_path directly to get months
+        # wechat:  <hash>/Image/<YYYY-MM>/ — list base_path/Image to get months
         if src_type == "xwechat":
             scan_base = base_path
         else:
@@ -294,13 +294,13 @@ def decode_chat_images(chat_username, _messages_unused, out_dir):
             for fname in files:
                 if not fname.endswith('.dat'):
                     continue
-                # 跳过缩略图 _t.dat 和 _t_W.dat
+                # Skip thumbnails _t.dat and _t_W.dat
                 base_no_ext = fname.rsplit('.', 1)[0]
                 if '_t' in base_no_ext.split('_'):
                     continue
                 if base_no_ext.endswith('_t') or '_t_' in base_no_ext:
                     continue
-                # 提取 base md5
+                # Extract base md5
                 base_md5 = base_no_ext.split('_')[0]
                 pri = _priority(fname)
                 existing = file_candidates.get(base_md5)
@@ -313,7 +313,7 @@ def decode_chat_images(chat_username, _messages_unused, out_dir):
     decoded_count = 0
     for base_md5, (pri, dat_path, month) in file_candidates.items():
         month_dir = os.path.join(out_dir, "image", month)
-        # 检查是否已解密
+        # Check if already decrypted
         existing = glob.glob(os.path.join(month_dir, f"{base_md5}.*"))
         if existing:
             rel = os.path.relpath(existing[0], out_dir).replace("\\", "/")
@@ -332,16 +332,16 @@ def decode_chat_images(chat_username, _messages_unused, out_dir):
     return image_map
 
 MSG_TYPES = {
-    1: "文本",
-    3: "图片",
-    34: "语音",
-    42: "名片",
-    43: "视频",
-    47: "表情包",
-    48: "位置",
-    49: "分享/文件/小程序",
-    10000: "系统消息",
-    10002: "系统通知",
+    1: "Text",
+    3: "Image",
+    34: "Voice",
+    42: "Business Card",
+    43: "Video",
+    47: "Emoji/Sticker",
+    48: "Location",
+    49: "Share/File/Mini App",
+    10000: "System Message",
+    10002: "System Notification",
 }
 
 _zstd_ctx = zstd.ZstdDecompressor()
@@ -367,7 +367,7 @@ def safe_dirname(name: str) -> str:
     return name.strip() or "unknown"
 
 def xml_extract(content: str, *tags) -> str:
-    """从 XML 中提取第一个匹配的 tag 文本"""
+    """Extract the text of the first matching tag from XML"""
     try:
         root = ET.fromstring(content)
         for tag in tags:
@@ -383,40 +383,40 @@ def xml_extract(content: str, *tags) -> str:
     return content[:200]
 
 def friendly_content(msg_type: int, content: str) -> str:
-    """返回适合显示的内容摘要"""
+    """Return a display-friendly content summary"""
     if msg_type == 1:
         return content
     if msg_type == 3:
-        return "[图片]"
+        return "[Image]"
     if msg_type == 34:
-        return "[语音]"
+        return "[Voice]"
     if msg_type == 42:
         title = xml_extract(content, "nickname")
-        return f"[名片: {title}]"
+        return f"[Business Card: {title}]"
     if msg_type == 43:
-        return "[视频]"
+        return "[Video]"
     if msg_type == 47:
-        return "[表情包]"
+        return "[Emoji/Sticker]"
     if msg_type == 48:
         loc = xml_extract(content, "label")
-        return f"[位置: {loc}]"
+        return f"[Location: {loc}]"
     if msg_type == 49:
         title = xml_extract(content, "title")
-        return f"[分享: {title}]" if title else "[文件/链接]"
+        return f"[Share: {title}]" if title else "[File/Link]"
     if msg_type in (10000, 10002):
-        return f"[系统: {content[:100]}]"
+        return f"[System: {content[:100]}]"
     return content[:200]
 
 HTML_TEMPLATE = """\
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title}</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#ededed;font-family:"PingFang SC","Helvetica Neue",Arial,sans-serif;font-size:14px}}
+body{{background:#ededed;font-family:"Helvetica Neue",Arial,sans-serif;font-size:14px}}
 .header{{background:#44A848;color:#fff;padding:12px 16px;font-size:17px;font-weight:bold;position:sticky;top:0;z-index:10;box-shadow:0 1px 3px rgba(0,0,0,.3)}}
 .chat{{padding:10px 0;max-width:800px;margin:0 auto}}
 .date-sep{{text-align:center;margin:12px 0;color:#999;font-size:12px}}
@@ -454,7 +454,7 @@ def _write_html(path: str, title: str, is_group: bool, messages: list, image_map
     last_date = None
     for m in messages:
         dt = datetime.fromtimestamp(m["create_time"])
-        day = dt.strftime("%Y年%m月%d日")
+        day = dt.strftime("%B %d, %Y")
         if day != last_date:
             parts.append(f'<div class="date-sep"><span>{day}</span></div>')
             last_date = day
@@ -476,7 +476,7 @@ def _write_html(path: str, title: str, is_group: bool, messages: list, image_map
         if m["type"] != 1:
             type_tag = f'<div class="type-tag">{m["type_name"]}</div>'
 
-        # 图片消息嵌入
+        # Embed image message
         bubble_content = _html_escape(m["display_content"])
         if m["type"] == 3 and image_map and m["local_id"] in image_map:
             rel_path = image_map[m["local_id"]]
@@ -489,13 +489,13 @@ def _write_html(path: str, title: str, is_group: bool, messages: list, image_map
                     try:
                         with open(abs_img, 'rb') as imgf:
                             b64 = base64.b64encode(imgf.read()).decode('ascii')
-                        bubble_content = f'<img src=\"data:{mime};base64,{b64}\" alt=\"图片\">'
+                        bubble_content = f'<img src=\"data:{mime};base64,{b64}\" alt=\"Image\">'
                     except Exception:
-                        bubble_content = f'<img src=\"{_html_escape(rel_path)}\" alt=\"图片\">'
+                        bubble_content = f'<img src=\"{_html_escape(rel_path)}\" alt=\"Image\">'
                 else:
-                    bubble_content = f'<img src=\"{_html_escape(rel_path)}\" alt=\"图片\">'
+                    bubble_content = f'<img src=\"{_html_escape(rel_path)}\" alt=\"Image\">'
             else:
-                bubble_content = f'<img src=\"{_html_escape(rel_path)}\" alt=\"图片\">'
+                bubble_content = f'<img src=\"{_html_escape(rel_path)}\" alt=\"Image\">'
 
         parts.append(
             f'<div class="msg {side}">'
@@ -513,7 +513,7 @@ def _write_html(path: str, title: str, is_group: bool, messages: list, image_map
         f.write(HTML_TEMPLATE.format(title=_html_escape(title), body=body))
 
 
-# ─── 加载联系人信息 ─────────────────────────────────────────────────────────────
+# ─── Load contact information ──────────────────────────────────────────────────
 contact_map: dict[str, dict] = {}
 try:
     cconn = sqlite3.connect(CONTACT_DB_PATH)
@@ -527,25 +527,25 @@ try:
             "nick_name": nick_name or "",
         }
     cconn.close()
-    print(f"联系人数据库: {len(contact_map)} 条")
+    print(f"Contact database: {len(contact_map)} entries")
 except Exception as e:
-    print(f"联系人数据库读取失败: {e}")
+    print(f"Failed to read contact database: {e}")
 
 def display_name(username: str) -> str:
     info = contact_map.get(username, {})
     return info.get("remark") or info.get("nick_name") or username
 
-# ─── 遍历所有 message_*.db ──────────────────────────────────────────────────────
+# ─── Iterate over all message_*.db files ───────────────────────────────────────
 db_files = sorted(
     f for f in glob.glob(os.path.join(MSG_DB_DIR, "message_*.db"))
     if not f.endswith(("_fts.db", "_resource.db"))
 )
-print(f"找到 {len(db_files)} 个消息数据库")
+print(f"Found {len(db_files)} message database(s)")
 
 total_chats = 0
 total_msgs = 0
 
-# ── 阶段1: 收集所有联系人的消息 ──────────────────────────────────────────────
+# ── Phase 1: Collect messages for all contacts ───────────────────────────────
 # chat_data[chat_username] -> { dname, is_group, db_messages: [(db_name, messages)] }
 chat_data: dict[str, dict] = {}
 
@@ -554,19 +554,19 @@ for db_path in sorted(db_files):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
-    # rowid -> username
+    # rowid -> username mapping
     sender_map: dict[int, str] = {}
     for row in conn.execute("SELECT rowid, user_name FROM Name2Id"):
         sender_map[row[0]] = row[1]
 
-    # 计算 username -> hash 映射
+    # Compute username -> hash mapping
     hash_to_username: dict[str, str] = {}
     for username in sender_map.values():
         if username:
             h = hashlib.md5(username.encode()).hexdigest()
             hash_to_username[h] = username
 
-    # 找出所有 Msg_<hash> 表
+    # Find all Msg_<hash> tables
     all_tables = [
         r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
@@ -581,7 +581,7 @@ for db_path in sorted(db_files):
         dname = safe_dirname(display_name(chat_username))
         is_group = chat_username.endswith("@chatroom") or chat_username.endswith("@openim")
 
-        # 读取该表所有消息
+        # Read all messages from this table
         try:
             rows = conn.execute(
                 f"SELECT local_id, server_id, local_type, sort_seq, real_sender_id,"
@@ -589,7 +589,7 @@ for db_path in sorted(db_files):
                 f" FROM {table_name} ORDER BY sort_seq"
             ).fetchall()
         except Exception as e:
-            print(f"  读取 {table_name} 失败: {e}")
+            print(f"  Failed to read {table_name}: {e}")
             continue
 
         if not rows:
@@ -602,8 +602,8 @@ for db_path in sorted(db_files):
 
             content = get_content(raw_content, ct_flag or 0)
             sender_uname = sender_map.get(real_sender_id, "")
-            sender_dn = display_name(sender_uname) if sender_uname else "我"
-            msg_type_name = MSG_TYPES.get(local_type, f"未知({local_type})")
+            sender_dn = display_name(sender_uname) if sender_uname else "Me"
+            msg_type_name = MSG_TYPES.get(local_type, f"Unknown({local_type})")
             display_content = friendly_content(local_type, content)
             is_system = local_type in (10000, 10002)
 
@@ -632,7 +632,7 @@ for db_path in sorted(db_files):
 
     conn.close()
 
-# ── 阶段2: 每个联系人解密图片一次，再写出文件 ────────────────────────────────
+# ── Phase 2: Decrypt images once per contact, then write output files ────────
 total_chats = 0
 total_msgs = 0
 
@@ -642,7 +642,7 @@ for chat_username, cdata in chat_data.items():
     out_dir = os.path.join(OUTPUT_DIR, dname)
     os.makedirs(out_dir, exist_ok=True)
 
-    # ── .info 文件 ────────────────────────────────────────────────────────
+    # ── .info file ───────────────────────────────────────────────────────
     info_path = os.path.join(out_dir, ".info")
     if not os.path.exists(info_path):
         info = contact_map.get(chat_username, {
@@ -655,16 +655,16 @@ for chat_username, cdata in chat_data.items():
             f.write(f"remark:    {info['remark']}\n")
             f.write(f"is_group:  {is_group}\n")
 
-    # ── 解密图片（每个联系人只执行一次）────────────────────────────────────
+    # ── Decrypt images (executed once per contact) ───────────────────────
     image_md5_map = {}
     if _EXPORT_IMAGES:
         image_md5_map = decode_chat_images(chat_username, None, out_dir)
         if image_md5_map:
-            print(f"  图片解密: {len(image_md5_map)} 张 ({dname})")
+            print(f"  Images decrypted: {len(image_md5_map)} ({dname})")
 
-    # ── 按 DB 写出消息文件 ────────────────────────────────────────────────
+    # ── Write message files per DB ───────────────────────────────────────
     for db_name, messages in cdata["db_messages"]:
-        # 建立 local_id -> rel_path 映射
+        # Build local_id -> rel_path mapping
         image_map = {}
         if image_md5_map:
             for m in messages:
@@ -680,7 +680,7 @@ for chat_username, cdata in chat_data.items():
             csv_path = os.path.join(out_dir, f"{db_name}.csv")
             with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
-                w.writerow(["时间", "发送者", "消息类型", "内容", "图片路径", "server_id"])
+                w.writerow(["Time", "Sender", "Message Type", "Content", "Image Path", "server_id"])
                 for m in messages:
                     img_path = image_map.get(m["local_id"], "") if m["type"] == 3 else ""
                     w.writerow([
@@ -707,7 +707,7 @@ for chat_username, cdata in chat_data.items():
 
         total_chats += 1
         total_msgs += len(messages)
-        print(f"  [{db_name}] {dname}: {len(messages)} 条消息")
+        print(f"  [{db_name}] {dname}: {len(messages)} messages")
 
-print(f"\n完成: {total_chats} 个会话, 共 {total_msgs} 条消息")
-print(f"输出目录: {os.path.abspath(OUTPUT_DIR)}")
+print(f"\nDone: {total_chats} conversation(s), {total_msgs} total messages")
+print(f"Output directory: {os.path.abspath(OUTPUT_DIR)}")

@@ -1,16 +1,16 @@
-"""批量解密 .dat 图片文件
+"""Batch decrypt .dat image files
 
-用法: python batch_decrypt_images.py <文件夹路径> [输出目录]
+Usage: python batch_decrypt_images.py <folder_path> [output_dir]
 
-递归扫描指定文件夹下的所有 .dat 文件并解密。
-输出目录默认为 <文件夹路径>_decoded/，保持原有子目录结构。
+Recursively scans all .dat files under the specified folder and decrypts them.
+Output directory defaults to <folder_path>_decoded/, preserving the original subdirectory structure.
 """
 import os
 import sys
 import glob
 import struct
 
-# Windows 控制台 UTF-8
+# Windows console UTF-8
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -53,7 +53,7 @@ def _detect_format(header):
 
 
 def decrypt_dat(dat_path):
-    """解密单个 .dat 文件，返回 (bytes, format) 或 (None, None)"""
+    """Decrypt a single .dat file, returns (bytes, format) or (None, None)"""
     with open(dat_path, 'rb') as f:
         data = f.read()
     if len(data) < 6:
@@ -61,7 +61,7 @@ def decrypt_dat(dat_path):
 
     head6 = data[:6]
 
-    # V2 / V1 格式 (AES-ECB + XOR)
+    # V2 / V1 format (AES-ECB + XOR)
     if head6 in (_V2_MAGIC_FULL, _V1_MAGIC_FULL):
         if head6 == _V1_MAGIC_FULL:
             aes_key = b'cfcd208495d565ef'
@@ -93,10 +93,10 @@ def decrypt_dat(dat_path):
             fmt = _detect_format(result[:16])
             return result, fmt
         except Exception as e:
-            print(f"  AES 解密失败: {e}")
+            print(f"  AES decryption failed: {e}")
             return None, None
 
-    # 旧 XOR 格式
+    # Legacy XOR format
     for fmt_name, magic in _IMAGE_MAGICS.items():
         key = data[0] ^ magic[0]
         match = all(i < len(data) and (data[i] ^ key) == magic[i] for i in range(len(magic)))
@@ -110,13 +110,13 @@ def decrypt_dat(dat_path):
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python batch_decrypt_images.py <文件夹路径> [输出目录]")
-        print("  递归扫描文件夹下所有 .dat 文件并解密")
+        print("Usage: python batch_decrypt_images.py <folder_path> [output_dir]")
+        print("  Recursively scan all .dat files under the folder and decrypt them")
         sys.exit(1)
 
     source_dir = os.path.abspath(sys.argv[1])
     if not os.path.isdir(source_dir):
-        print(f"目录不存在: {source_dir}")
+        print(f"Directory does not exist: {source_dir}")
         sys.exit(1)
 
     if len(sys.argv) >= 3:
@@ -124,7 +124,7 @@ def main():
     else:
         output_dir = source_dir.rstrip(os.sep) + "_decoded"
 
-    # 递归收集所有 .dat 文件
+    # Recursively collect all .dat files
     dat_files = []
     for root, _dirs, files in os.walk(source_dir):
         for f in files:
@@ -132,9 +132,9 @@ def main():
                 dat_files.append(os.path.join(root, f))
     dat_files.sort()
 
-    print(f"源目录: {source_dir}")
-    print(f"输出目录: {output_dir}")
-    print(f"找到 {len(dat_files)} 个 .dat 文件")
+    print(f"Source directory: {source_dir}")
+    print(f"Output directory: {output_dir}")
+    print(f"Found {len(dat_files)} .dat file(s)")
     print()
 
     total = len(dat_files)
@@ -143,20 +143,20 @@ def main():
     failed = 0
 
     for dat_path in dat_files:
-        # 保持相对目录结构
+        # Preserve relative directory structure
         rel = os.path.relpath(dat_path, source_dir)
         rel_dir = os.path.dirname(rel)
         out_subdir = os.path.join(output_dir, rel_dir) if rel_dir else output_dir
 
         fname = os.path.splitext(os.path.basename(dat_path))[0]
-        # 去除 _t / _h 后缀获取基础名
+        # Strip _t / _h suffix to get base name
         base_name = fname
         for suffix in ('_t', '_h'):
             if base_name.endswith(suffix):
                 base_name = base_name[:-len(suffix)]
                 break
 
-        # 检查是否已解密
+        # Check if already decrypted
         existing = glob.glob(os.path.join(out_subdir, f"{base_name}.*"))
         if existing:
             skipped += 1
@@ -173,8 +173,8 @@ def main():
             f.write(img_bytes)
         success += 1
 
-    print(f"完成: 共 {total} 个文件, 成功 {success}, 跳过(已存在) {skipped}, 失败 {failed}")
-    print(f"输出: {output_dir}")
+    print(f"Done: {total} file(s) total, {success} succeeded, {skipped} skipped (already exist), {failed} failed")
+    print(f"Output: {output_dir}")
 
 
 if __name__ == "__main__":

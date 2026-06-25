@@ -1,6 +1,6 @@
 """
-配置加载器 - 从 config.json 读取路径配置
-首次运行时自动检测微信数据目录，检测失败则提示手动配置
+Configuration loader - reads path configuration from config.json
+On first run, auto-detects the WeChat data directory; prompts for manual configuration if detection fails
 """
 import glob
 import json
@@ -10,7 +10,7 @@ import sys
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
-# 打包后 __file__ 指向临时目录，优先使用环境变量指定的 exe 所在目录。
+# After packaging, __file__ points to a temp directory; prefer the exe's directory specified via env var.
 def _app_base_dir():
     d = os.environ.get("WECHAT_DECRYPT_APP_DIR")
     if d and os.path.isdir(d):
@@ -33,7 +33,7 @@ if _SYSTEM == "linux":
     _DEFAULT_TEMPLATE_DIR = os.path.expanduser("~/Documents/xwechat_files/your_wxid/db_storage")
     _DEFAULT_PROCESS = "wechat"
 elif _SYSTEM == "darwin":
-    # macOS 使用独立的 C 扫描器 (find_all_keys_macos.c)，此处仅提供 config 默认值
+    # macOS uses a standalone C scanner (find_all_keys_macos.c); this only provides config defaults
     _DEFAULT_TEMPLATE_DIR = os.path.expanduser(
         "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/your_wxid/db_storage"
     )
@@ -53,8 +53,8 @@ _DEFAULT = {
     "wxwork_decrypted_dir": "wxwork_decrypted",
     "wxwork_export_dir": "wxwork_export",
     "wxwork_process": "WXWork.exe",
-    # 语音转录后端: "local" (默认, 本地 Whisper) 或 "openai" (OpenAI API)
-    # 切到 openai 时语音将上传至 OpenAI 服务器, 详见 README "语音转录隐私" 章节
+    # Transcription backend: "local" (default, local Whisper) or "openai" (OpenAI API)
+    # When set to "openai", audio will be uploaded to OpenAI servers; see README "Transcription Privacy" section
     "transcription_backend": "local",
     "local_whisper_model": "base",
     "openai_api_key": "",
@@ -62,7 +62,7 @@ _DEFAULT = {
 
 
 def _choose_candidate(candidates):
-    """在多个候选目录中选择一个。"""
+    """Select one from multiple candidate directories."""
     if len(candidates) == 1:
         return candidates[0]
     if len(candidates) > 1:
@@ -72,18 +72,18 @@ def _choose_candidate(candidates):
             or not sys.stdin.isatty()
         ):
             return candidates[0]
-        print("[!] 检测到多个微信数据目录（请选择当前正在运行的微信账号）:")
+        print("[!] Multiple WeChat data directories detected (please select the currently active account):")
         for i, c in enumerate(candidates, 1):
             print(f"    {i}. {c}")
-        print("    0. 跳过，稍后手动配置")
+        print("    0. Skip, configure manually later")
         try:
             while True:
-                choice = input("请选择 [0-{}]: ".format(len(candidates))).strip()
+                choice = input("Select [0-{}]: ".format(len(candidates))).strip()
                 if choice == "0":
                     return None
                 if choice.isdigit() and 1 <= int(choice) <= len(candidates):
                     return candidates[int(choice) - 1]
-                print("    无效输入，请重新选择")
+                print("    Invalid input, please select again")
         except (EOFError, KeyboardInterrupt):
             print()
             return None
@@ -91,21 +91,21 @@ def _choose_candidate(candidates):
 
 
 def _auto_detect_db_dir_windows():
-    """从微信本地配置自动检测 Windows db_storage 路径。
+    """Auto-detect Windows db_storage path from WeChat local config.
 
-    读取 %APPDATA%\\Tencent\\xwechat\\config\\*.ini，
-    找到数据存储根目录，然后匹配 xwechat_files\\*\\db_storage。
+    Reads %APPDATA%\\Tencent\\xwechat\\config\\*.ini,
+    finds the data storage root, then matches xwechat_files\\*\\db_storage.
     """
     appdata = os.environ.get("APPDATA", "")
     config_dir = os.path.join(appdata, "Tencent", "xwechat", "config")
     if not os.path.isdir(config_dir):
         return None
 
-    # 从 ini 文件中找到有效的目录路径
+    # Find valid directory paths from ini files
     data_roots = []
     for ini_file in glob.glob(os.path.join(config_dir, "*.ini")):
         try:
-            # 微信 ini 可能是 utf-8 或 gbk 编码（中文路径）
+            # WeChat ini may be utf-8 or gbk encoded (for Chinese paths)
             content = None
             for enc in ("utf-8", "gbk"):
                 try:
@@ -121,7 +121,7 @@ def _auto_detect_db_dir_windows():
         except OSError:
             continue
 
-    # 在每个根目录下搜索 xwechat_files\*\db_storage
+    # Search for xwechat_files\*\db_storage under each root directory
     seen = set()
     candidates = []
     for root in data_roots:
@@ -136,20 +136,20 @@ def _auto_detect_db_dir_windows():
 
 
 def _auto_detect_db_dir_linux():
-    """自动检测 Linux 微信 db_storage 路径。
+    """Auto-detect Linux WeChat db_storage path.
 
-    优先搜索当前用户的 home 目录。以 sudo 运行时通过 SUDO_USER 回退到
-    实际用户的 home，避免只搜索 /root 而遗漏真实数据目录。
+    Searches the current user's home directory first. When running with sudo,
+    falls back to the real user's home via SUDO_USER to avoid only searching /root.
     """
     seen = set()
     candidates = []
     search_roots = [
         os.path.expanduser("~/Documents/xwechat_files"),
     ]
-    # sudo 运行时，~ 展开为 /root；回退到实际用户的 home
+    # When running with sudo, ~ expands to /root; fall back to the real user's home
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
-        # 验证 SUDO_USER 是合法系统用户，防止路径注入
+        # Validate SUDO_USER is a legitimate system user to prevent path injection
         import pwd
         try:
             sudo_home = pwd.getpwnam(sudo_user).pw_dir
@@ -170,14 +170,14 @@ def _auto_detect_db_dir_linux():
                 seen.add(normalized)
                 candidates.append(match)
 
-    # 早期 Linux 微信版本（wine/容器方案）使用的数据路径
+    # Data path used by early Linux WeChat versions (wine/container setups)
     old_path = os.path.expanduser("~/.local/share/weixin/data/db_storage")
     if os.path.isdir(old_path):
         normalized = os.path.normcase(os.path.normpath(old_path))
         if normalized not in seen:
             candidates.append(old_path)
 
-    # 优先使用最近活跃账号：按 message 目录 mtime 降序（近似排序，best-effort）
+    # Prioritize most recently active account: sort by message dir mtime descending (approximate, best-effort)
     def _mtime(path):
         msg_dir = os.path.join(path, "message")
         target = msg_dir if os.path.isdir(msg_dir) else path
@@ -191,10 +191,10 @@ def _auto_detect_db_dir_linux():
 
 
 def _auto_detect_db_dir_macos():
-    """自动检测 macOS 微信 db_storage 路径。
+    """Auto-detect macOS WeChat db_storage path.
 
-    微信 4.x 数据目录位于 ~/Library/Containers/com.tencent.xinWeChat/.../xwechat_files/<wxid>/db_storage，
-    路径中包含随机 hash，需要搜索定位。
+    WeChat 4.x data directory is at ~/Library/Containers/com.tencent.xinWeChat/.../xwechat_files/<wxid>/db_storage;
+    the path contains a random hash and must be located by searching.
     """
     base = os.path.expanduser(
         "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
@@ -211,7 +211,7 @@ def _auto_detect_db_dir_macos():
             seen.add(normalized)
             candidates.append(match)
 
-    # 优先使用最近活跃账号：按 message 目录 mtime 降序
+    # Prioritize most recently active account: sort by message dir mtime descending
     def _mtime(path):
         msg_dir = os.path.join(path, "message")
         target = msg_dir if os.path.isdir(msg_dir) else path
@@ -242,35 +242,35 @@ def load_config():
             with open(config_file, encoding="utf-8") as f:
                 cfg = json.load(f)
         except json.JSONDecodeError:
-            print(f"[!] {config_file} 格式损坏，将使用默认配置")
+            print(f"[!] {config_file} is corrupted, using default configuration")
             cfg = {}
-    # db_dir 缺失或仍为模板值时，尝试自动检测
+    # If db_dir is missing or still the template value, attempt auto-detection
     db_dir = cfg.get("db_dir", "")
     if not db_dir or db_dir == _DEFAULT_TEMPLATE_DIR or "your_wxid" in db_dir:
         detected = auto_detect_db_dir()
         if detected:
-            print(f"[+] 自动检测到微信数据目录: {detected}")
+            print(f"[+] Auto-detected WeChat data directory: {detected}")
             cfg = {**_DEFAULT, **cfg, "db_dir": detected}
             with open(config_file, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=4, ensure_ascii=False)
-            print(f"[+] 已保存到: {config_file}")
+            print(f"[+] Saved to: {config_file}")
         else:
             if not os.path.exists(config_file):
                 with open(config_file, "w", encoding="utf-8") as f:
                     json.dump(_DEFAULT, f, indent=4, ensure_ascii=False)
-            print(f"[!] 未能自动检测微信数据目录")
-            print(f"    请手动编辑 {config_file} 中的 db_dir 字段")
+            print(f"[!] Failed to auto-detect WeChat data directory")
+            print(f"    Please manually edit the db_dir field in {config_file}")
             if _SYSTEM == "linux":
-                print("    Linux 默认路径类似: ~/Documents/xwechat_files/<wxid>/db_storage")
+                print("    Linux default path is similar to: ~/Documents/xwechat_files/<wxid>/db_storage")
             elif _SYSTEM == "darwin":
-                print("    macOS 默认路径类似: ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage")
+                print("    macOS default path is similar to: ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage")
             else:
-                print(f"    路径可在 微信设置 → 文件管理 中找到")
+                print(f"    Path can be found in WeChat Settings -> File Management")
             sys.exit(1)
     else:
         cfg = {**_DEFAULT, **cfg}
 
-    # 将相对路径转为绝对路径
+    # Convert relative paths to absolute paths
     base = _app_base_dir()
     for key in (
         "keys_file", "decrypted_dir", "decoded_image_dir",
@@ -278,11 +278,11 @@ def load_config():
     ):
         if key in cfg and cfg[key] and not os.path.isabs(cfg[key]):
             cfg[key] = os.path.join(base, cfg[key])
-    # 路径展开:先 expanduser(~ 展开)+ expandvars($HOME / %USERPROFILE% 展开),
-    # 再判 isabs;还相对就 join 项目根。这样 config 里既能写
-    # "all_keys.json"(项目根相对),也能写 "~/Documents/wechat_decrypted" /
-    # "$HOME/wechat" / "%USERPROFILE%\\wechat"(跨用户便携)。
-    # 空字串 / null 不再触发 TypeError(用 cfg.get 而非 in)。
+    # Path expansion: first expanduser (~ expansion) + expandvars ($HOME / %USERPROFILE% expansion),
+    # then check isabs; if still relative, join with project root. This allows config to use
+    # "all_keys.json" (relative to project root) or "~/Documents/wechat_decrypted" /
+    # "$HOME/wechat" / "%USERPROFILE%\\wechat" (portable across users).
+    # Empty strings / null no longer trigger TypeError (using cfg.get instead of in).
     base = _app_base_dir()
     if cfg.get("db_dir"):
         cfg["db_dir"] = os.path.expanduser(os.path.expandvars(cfg["db_dir"]))
@@ -292,28 +292,28 @@ def load_config():
             if not os.path.isabs(cfg[key]):
                 cfg[key] = os.path.join(base, cfg[key])
 
-    # 自动推导微信数据根目录（db_dir 的上级目录）
-    # db_dir 格式: D:\xwechat_files\<wxid>\db_storage
-    # base_dir 格式: D:\xwechat_files\<wxid>
+    # Auto-derive WeChat data root directory (parent of db_dir)
+    # db_dir format: D:\xwechat_files\<wxid>\db_storage
+    # base_dir format: D:\xwechat_files\<wxid>
     db_dir = cfg.get("db_dir", "")
     if db_dir and os.path.basename(db_dir) == "db_storage":
         cfg["wechat_base_dir"] = os.path.dirname(db_dir)
     else:
         cfg["wechat_base_dir"] = db_dir
 
-    # 输出目录：<app_dir>/wechat_files/<wxid>/
+    # Output directory: <app_dir>/wechat_files/<wxid>/
     wxid = os.path.basename(os.path.normpath(cfg["wechat_base_dir"]))
     cfg["output_base_dir"] = os.path.join(base, "wechat_files", wxid)
 
-    # decoded_image_dir 默认值
+    # decoded_image_dir default value
     if "decoded_image_dir" not in cfg:
         cfg["decoded_image_dir"] = os.path.join(base, "decoded_images")
 
-    # 自动检测 WeChat Files 目录（FileStorage/MsgAttach, FileStorage/Sns/Cache）
+    # Auto-detect WeChat Files directory (FileStorage/MsgAttach, FileStorage/Sns/Cache)
     if not cfg.get("wechat_files_dir"):
         wechat_files_base = os.path.join(os.path.expanduser("~"), "Documents", "WeChat Files")
         if os.path.isdir(wechat_files_base):
-            # xwechat_files 的 wxid 可能带后缀如 _1d4c，需要模糊匹配
+            # wxid in xwechat_files may have a suffix like _1d4c, requires fuzzy matching
             wxid_prefix = wxid.rsplit("_", 1)[0] if "_" in wxid else wxid
             for d in os.listdir(wechat_files_base):
                 if d == wxid or d == wxid_prefix or wxid.startswith(d):
@@ -326,7 +326,7 @@ def load_config():
     cfg["msgattach_dir"] = os.path.join(wf_dir, "FileStorage", "MsgAttach") if wf_dir else ""
     cfg["sns_cache_dir"] = os.path.join(wf_dir, "FileStorage", "Sns", "Cache") if wf_dir else ""
 
-    # xwechat_files 图片/缓存路径
+    # xwechat_files image/cache paths
     wb = cfg["wechat_base_dir"]
     cfg["xwechat_attach_dir"] = os.path.join(wb, "msg", "attach") if wb else ""
     cfg["xwechat_cache_dir"] = os.path.join(wb, "cache") if wb else ""

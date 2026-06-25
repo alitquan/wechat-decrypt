@@ -1,10 +1,10 @@
-"""
-微信实时消息监听器 - Web UI (SSE推送 + mtime检测)
+﻿"""
+WeChat real-time message monitor - Web UI (SSE push + mtime detection)
 
 http://localhost:5678
-- 30ms轮询WAL/DB文件的mtime变化（WAL是预分配固定大小，不能用size检测）
-- 检测到变化后：全量解密DB + 全量WAL patch
-- SSE 服务器推送
+- 30ms polling of WAL/DB file mtime changes (WAL is pre-allocated fixed size, cannot use size detection)
+- On change detected: full DB decrypt + full WAL patch
+- SSE server push
 """
 import hashlib, struct, os, sys, json, time, sqlite3, io, threading, queue, traceback, subprocess
 import uuid
@@ -40,10 +40,10 @@ DECRYPTED_SESSION = os.path.join(_cfg["decrypted_dir"], "session", "session.db")
 DECODED_IMAGE_DIR = _cfg.get("decoded_image_dir", os.path.join(os.path.dirname(os.path.abspath(__file__)), "decoded_images"))
 MONITOR_CACHE_DIR = os.path.join(_cfg["decrypted_dir"], "_monitor_cache")
 WECHAT_BASE_DIR = _cfg.get("wechat_base_dir", "")
-IMAGE_AES_KEY = _cfg.get("image_aes_key")  # V2 格式 AES key (从微信内存提取)
+IMAGE_AES_KEY = _cfg.get("image_aes_key")  # V2 format AES key (extracted from WeChat memory)
 IMAGE_XOR_KEY = _cfg.get("image_xor_key", 0x88)  # XOR key
 
-POLL_MS = 30  # 高频轮询WAL/DB的mtime，30ms一次
+POLL_MS = 30  # High-frequency polling of WAL/DB mtime, once every 30ms
 PORT = 5678
 
 sse_clients = []
@@ -54,7 +54,7 @@ MAX_LOG = 500
 _img_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix='img')
 _hidden_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='hidden')
 
-# ---- Emoji 缓存 (使用 emoticons.py 公共模块) ----
+# ---- Emoji cache (using emoticons.py shared module) ----
 from emoticons import build_emoji_lookup as _build_emoji_lookup_mod, download_emoji as _download_emoji_mod, convert_hevc_to_jpeg as _convert_hevc_to_jpeg
 
 _emoji_lookup = {}       # md5 → dict
@@ -78,14 +78,14 @@ def _download_emoji(md5):
         info = _emoji_lookup.get(md5)
     if not info:
         if _emoji_keys_dict and time.time() - _emoji_last_refresh > 60:
-            print(f"  [emoji] lookup miss, 刷新 emoticon.db...", flush=True)
+            print(f"  [emoji] lookup miss, refreshing emoticon.db...", flush=True)
             _build_emoji_lookup(_emoji_keys_dict)
         with _emoji_lookup_lock:
             info = _emoji_lookup.get(md5)
         if not info:
             return None
 
-    # 先检查是否已缓存（旧文件名格式兼容）
+    # Check if already cached first (compatible with old filename format)
     for ext in ('.gif', '.png', '.jpg', '.webp'):
         cached = os.path.join(DECODED_IMAGE_DIR, f"emoji_{md5}{ext}")
         if os.path.exists(cached):
@@ -93,7 +93,7 @@ def _download_emoji(md5):
 
     result = _download_emoji_mod(md5, _emoji_lookup, DECODED_IMAGE_DIR)
     if result:
-        # 统一用 emoji_ 前缀（兼容旧缓存）
+        # Standardize with emoji_ prefix (compatible with old cache)
         src = os.path.join(DECODED_IMAGE_DIR, result)
         dst = os.path.join(DECODED_IMAGE_DIR, f"emoji_{result}")
         if src != dst and os.path.exists(src):
@@ -103,14 +103,14 @@ def _download_emoji(md5):
 
 
 class MonitorDBCache:
-    """轻量 DB 缓存，mtime 检测变化时重新解密（线程安全）"""
+    """Lightweight DB cache, re-decrypts when mtime change is detected (thread-safe)"""
 
     def __init__(self, keys, tmp_dir):
         self.keys = keys
         self.tmp_dir = tmp_dir
         os.makedirs(tmp_dir, exist_ok=True)
         self._state = {}  # rel_key → (db_mtime, wal_mtime)
-        self._locks = {}  # per-key 锁，防止并发解密同一 DB
+        self._locks = {}  # per-key lock, prevents concurrent decryption of same DB
         self._meta_lock = threading.Lock()
 
     def _get_lock(self, rel_key):
@@ -120,23 +120,23 @@ class MonitorDBCache:
             return self._locks[rel_key]
 
     def invalidate(self, rel_key):
-        """强制清除缓存状态，下次 get() 会重新全量解密"""
+        """Force clear cache state, next get() will re-decrypt from scratch"""
         lock = self._get_lock(rel_key)
         with lock:
             self._state.pop(rel_key, None)
 
     def peek(self, rel_key):
-        """返回当前已解密文件路径,**不触发**重新解密 (即使源 mtime 变了)。
+        """Return the current decrypted file path **without triggering** re-decryption (even if source mtime changed).
 
-        给主循环 hot path (check_updates → _lookup_latest_message) 用,
-        避免每次新消息都同步等待整个 message_N.db 重新全量解密 (10s+),
-        把主循环延迟从亚秒级飙到 8-125s。
+        Used by main loop hot path (check_updates → _lookup_latest_message),
+        avoids synchronously waiting for entire message_N.db full re-decryption (10s+) on every new message,
+        which would push main loop latency from sub-second to 8-125s.
 
-        返回的路径可能 stale (滞后 1 个 mtime 周期)。调用方应能容忍 stale
-        (比如查不到 latest_local_id 时跳过加 _shown_keys, 让 hidden 路径
-        异步兜底)。
+        Returned path may be stale (one mtime cycle behind). Callers must tolerate stale
+        (e.g. skip adding to _shown_keys when latest_local_id not found, let hidden path
+        handle it asynchronously as fallback).
 
-        get() 仍保留同步行为给真正需要最新的调用方 (hidden 路径异步线程)。
+        get() still retains synchronous behavior for callers that truly need the latest (hidden path async thread).
         """
         if not get_key_info(self.keys, rel_key):
             return None
@@ -145,7 +145,7 @@ class MonitorDBCache:
         return out_path if os.path.exists(out_path) else None
 
     def get(self, rel_key):
-        """返回解密后的临时文件路径，mtime 变化时自动重新解密"""
+        """Return decrypted temp file path, automatically re-decrypts when mtime changes"""
         key_info = get_key_info(self.keys, rel_key)
         if not key_info:
             return None
@@ -185,7 +185,7 @@ class MonitorDBCache:
                 if os.path.exists(wal_path):
                     decrypt_wal_full(wal_path, out_path, enc_key)
                 ms = (time.perf_counter() - t0) * 1000
-                print(f"  [cache] {rel_key} 全量解密 {ms:.0f}ms", flush=True)
+                print(f"  [cache] {rel_key} full decrypt {ms:.0f}ms", flush=True)
                 self._state[rel_key] = (db_mtime, wal_mtime)
             elif wal_mtime != prev[1]:
                 t0 = time.perf_counter()
@@ -198,12 +198,12 @@ class MonitorDBCache:
 
 
 def build_username_db_map():
-    """从已解密的 Name2Id 表构建 username → [db_keys] 映射
+    """Build username → [db_keys] mapping from decrypted Name2Id table
 
-    同一个 username 可能存在于多个 message_N.db 中,
-    按 DB 文件修改时间倒序排列（最新的排前面）。
+    The same username may exist in multiple message_N.db files,
+    sorted in descending order by DB file modification time (newest first).
     """
-    # 先获取每个 DB 的 mtime 用于排序
+    # Get mtime for each DB first for sorting
     db_mtimes = {}
     for i in range(5):
         rel_key = os.path.join("message", f"message_{i}.db")
@@ -213,7 +213,7 @@ def build_username_db_map():
         except OSError:
             db_mtimes[rel_key] = 0
 
-    mapping = {}  # username → [db_keys], 最新的在前
+    mapping = {}  # username → [db_keys], newest first
     decrypted_msg_dir = os.path.join(_cfg["decrypted_dir"], "message")
     for i in range(5):
         db_path = os.path.join(decrypted_msg_dir, f"message_{i}.db")
@@ -230,7 +230,7 @@ def build_username_db_map():
         except Exception as e:
             print(f"  [WARN] Name2Id message_{i}.db: {e}", flush=True)
 
-    # 对每个 username 的 db_keys 按 mtime 倒序（最新的优先）
+    # Sort db_keys for each username in descending mtime order (newest first)
     for username in mapping:
         mapping[username].sort(key=lambda k: db_mtimes.get(k, 0), reverse=True)
 
@@ -238,7 +238,7 @@ def build_username_db_map():
 
 
 def decrypt_page(enc_key, page_data, pgno):
-    """解密单个加密页面"""
+    """Decrypt a single encrypted page"""
     iv = page_data[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + 16]
     if pgno == 1:
         encrypted = page_data[SALT_SZ: PAGE_SZ - RESERVE_SZ]
@@ -253,7 +253,7 @@ def decrypt_page(enc_key, page_data, pgno):
 
 
 def full_decrypt(db_path, out_path, enc_key):
-    """首次全量解密"""
+    """Initial full decryption"""
     t0 = time.perf_counter()
     file_size = os.path.getsize(db_path)
     total_pages = file_size // PAGE_SZ
@@ -274,12 +274,12 @@ def full_decrypt(db_path, out_path, enc_key):
 
 
 def decrypt_wal_full(wal_path, out_path, enc_key):
-    """解密WAL当前有效frame，patch到已解密的DB副本
+    """Decrypt currently valid WAL frames and patch into the decrypted DB copy
 
-    WAL是预分配固定大小(4MB)，包含当前有效frame和上一轮遗留的旧frame。
-    通过WAL header中的salt值区分：只有frame header的salt匹配WAL header的才是有效frame。
+    WAL is pre-allocated fixed size (4MB), containing current valid frames and leftover old frames from previous round.
+    Differentiated by salt value in WAL header: only frames whose salt matches the WAL header salt are valid.
 
-    返回: (patched_pages, elapsed_ms)
+    Returns: (patched_pages, elapsed_ms)
     """
     t0 = time.perf_counter()
 
@@ -294,7 +294,7 @@ def decrypt_wal_full(wal_path, out_path, enc_key):
     patched = 0
 
     with open(wal_path, 'rb') as wf, open(out_path, 'r+b') as df:
-        # 读WAL header，获取当前salt值
+        # Read WAL header to get current salt value
         wal_hdr = wf.read(WAL_HEADER_SZ)
         wal_salt1 = struct.unpack('>I', wal_hdr[16:20])[0]
         wal_salt2 = struct.unpack('>I', wal_hdr[20:24])[0]
@@ -311,11 +311,11 @@ def decrypt_wal_full(wal_path, out_path, enc_key):
             if len(ep) < PAGE_SZ:
                 break
 
-            # 校验: pgno有效 且 salt匹配当前WAL周期
+            # Validate: pgno is valid and salt matches current WAL cycle
             if pgno == 0 or pgno > 1000000:
                 continue
             if frame_salt1 != wal_salt1 or frame_salt2 != wal_salt2:
-                continue  # 旧周期遗留的frame，跳过
+                continue  # Leftover frame from old cycle, skip
 
             dec = decrypt_page(enc_key, ep, pgno)
             df.seek((pgno - 1) * PAGE_SZ)
@@ -327,11 +327,11 @@ def decrypt_wal_full(wal_path, out_path, enc_key):
 
 
 def load_contact_names(db_path=None):
-    """加载联系人名字字典。
+    """Load contact name dictionary.
 
     Args:
-        db_path: 指定的 contact.db 路径。None 则使用 CONTACT_CACHE（静态快照，可能过期）。
-                 实时场景应传入 db_cache.get("contact/contact.db") 返回的路径，确保数据最新。
+        db_path: Specified contact.db path. None uses CONTACT_CACHE (static snapshot, may be stale).
+                 For live scenarios pass the path returned by db_cache.get("contact/contact.db") to ensure fresh data.
     """
     names = {}
     try:
@@ -345,7 +345,7 @@ def load_contact_names(db_path=None):
 
 
 def _extract_pb_field_30(data):
-    """从 extra_buffer (protobuf) 中提取 Field #30 的字符串值（联系人标签ID）"""
+    """Extract Field #30 string value (contact label ID) from extra_buffer (protobuf)"""
     if not data:
         return None
     pos = 0
@@ -389,7 +389,7 @@ def _extract_pb_field_30(data):
 
 
 def load_contact_tags():
-    """加载联系人标签及其成员"""
+    """Load contact labels and their members"""
     try:
         conn = sqlite3.connect(CONTACT_CACHE)
         try:
@@ -436,9 +436,9 @@ def load_contact_tags():
 
 def format_msg_type(t):
     return {
-        1: '文本', 3: '图片', 34: '语音', 42: '名片',
-        43: '视频', 47: '表情', 48: '位置', 49: '链接/文件',
-        50: '通话', 10000: '系统', 10002: '撤回',
+        1: 'Text', 3: 'Image', 34: 'Voice', 42: 'Contact',
+        43: 'Video', 47: 'Emoji', 48: 'Location', 49: 'Link/File',
+        50: 'Call', 10000: 'System', 10002: 'Retract',
     }.get(t, f'type={t}')
 
 
@@ -470,11 +470,11 @@ def broadcast_sse(msg_data):
 
 
 
-# ============ 监听器 ============
+# ============ Monitor ============
 
 class SessionMonitor:
-    # 改名/备注变更场景的刷新最小间隔（秒）。低于此间隔的 mtime 变化不触发
-    # 全量 reload，避免微信高频写 contact.db 时 CPU 抖动。30s 是经验值。
+    # Minimum refresh interval (seconds) for rename/remark change scenarios. mtime changes below
+    # this interval do not trigger full reload, avoiding CPU jitter when WeChat writes contact.db frequently. 30s is empirical.
     CONTACT_REFRESH_COOLDOWN = 30
 
     def __init__(self, enc_key, session_db, contact_names, db_cache=None, username_db_map=None):
@@ -487,28 +487,28 @@ class SessionMonitor:
         self.prev_state = {}
         self.decrypt_ms = 0
         self.patched_pages = 0
-        # 已显示消息去重: {(username, timestamp, base_msg_type), ...}
+        # Dedup for displayed messages: {(username, timestamp, base_msg_type), ...}
         self._shown_keys = set()
-        # contact.db mtime + 上次刷新时间，用于检测改名/备注变更
+        # contact.db mtime + last refresh time, used to detect rename/remark changes
         self._contact_db_mtime = 0
         self._last_contact_refresh = 0
 
     def _maybe_refresh_contacts(self):
-        """检测 contact.db mtime 变化时全量 reload 联系人缓存。
+        """Full reload contact cache when contact.db mtime change is detected.
 
-        覆盖三种变更场景:
-        - 新增联系人（之前 commit e86e00d 只覆盖了这种）
-        - 修改备注名（issue #67）
-        - 修改群名
+        Covers three change scenarios:
+        - New contact added (previous commit e86e00d only covered this)
+        - Remark name modified (issue #67)
+        - Group name modified
 
-        受 CONTACT_REFRESH_COOLDOWN 节流，避免 contact.db 高频变更时反复 reload。
+        Throttled by CONTACT_REFRESH_COOLDOWN to avoid repeated reload on high-frequency contact.db changes.
         """
         if not self.db_cache:
             return
         try:
             contact_path = self.db_cache.get(os.path.join("contact", "contact.db"))
         except Exception as e:
-            print(f"  [contact] 实时解密 contact.db 失败: {e}", flush=True)
+            print(f"  [contact] live decrypt contact.db failed: {e}", flush=True)
             return
         if not contact_path:
             return
@@ -518,9 +518,9 @@ class SessionMonitor:
             return
         now = time.time()
         if curr_mtime <= self._contact_db_mtime:
-            return  # mtime 没变，跳过
+            return  # mtime unchanged, skip
         if now - self._last_contact_refresh < self.CONTACT_REFRESH_COOLDOWN:
-            return  # cooldown 中，等下次
+            return  # in cooldown, wait for next cycle
         refreshed = load_contact_names(contact_path)
         if refreshed:
             self.contact_names.update(refreshed)
@@ -528,16 +528,16 @@ class SessionMonitor:
         self._last_contact_refresh = now
 
     def resolve_image(self, username, timestamp):
-        """解密图片: username+timestamp → 解密后的图片文件名，失败返回 None"""
+        """Decrypt image: username+timestamp → decrypted image filename, returns None on failure"""
         if not self.db_cache or not self.username_db_map:
             return None
 
-        # 1. 找到 username 对应的所有 message_N.db（按 mtime 倒序）
+        # 1. Find all message_N.db files corresponding to username (sorted by mtime desc)
         db_keys = self.username_db_map.get(username)
         if not db_keys:
             return None
 
-        # 2. 遍历候选 DB，找到包含该 timestamp 消息的那个
+        # 2. Iterate candidate DBs to find the one containing that timestamp message
         table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
         local_id = None
         for db_key in db_keys:
@@ -547,7 +547,7 @@ class SessionMonitor:
                     break
                 try:
                     conn = sqlite3.connect(f"file:{msg_db_path}?mode=ro", uri=True)
-                    # 微信4.0 图片的 local_type 可能是复合编码: (sub<<32)|3
+                    # WeChat 4.0 image local_type may be composite encoding: (sub<<32)|3
                     row = conn.execute(f"""
                         SELECT local_id FROM [{table_name}]
                         WHERE (local_type = 3 OR (local_type > 4294967296 AND local_type % 4294967296 = 3))
@@ -566,21 +566,21 @@ class SessionMonitor:
                     break
                 except Exception as e:
                     if 'malformed' in str(e) and _try == 0:
-                        print(f"  [img] {db_key} malformed, 强制刷新...", flush=True)
+                        print(f"  [img] {db_key} malformed, force refresh...", flush=True)
                         self.db_cache.invalidate(db_key)
                         continue
                     if 'no such table' not in str(e):
-                        print(f"  [img] 查询 {db_key}/{table_name} 失败: {e}", flush=True)
+                        print(f"  [img] query {db_key}/{table_name} failed: {e}", flush=True)
                     break
             if local_id:
                 break
 
         if not local_id:
-            print(f"  [img] 未找到 local_id: {username} t={timestamp}", flush=True)
+            print(f"  [img] local_id not found: {username} t={timestamp}", flush=True)
             return None
 
-        # 4. 查 message_resource.db 获取 MD5
-        #    local_id 不全局唯一，需要同时匹配 create_time
+        # 4. Query message_resource.db to get MD5
+        #    local_id is not globally unique, must also match create_time
         file_md5 = None
         for _try in range(2):
             res_path = self.db_cache.get(os.path.join("message", "message_resource.db"))
@@ -607,59 +607,59 @@ class SessionMonitor:
                 break
             except Exception as e:
                 if 'malformed' in str(e) and _try == 0:
-                    print(f"  [img] resource DB malformed, 强制刷新...", flush=True)
+                    print(f"  [img] resource DB malformed, force refresh...", flush=True)
                     self.db_cache.invalidate(os.path.join("message", "message_resource.db"))
                     continue
-                print(f"  [img] 查询 message_resource 失败: {e}", flush=True)
+                print(f"  [img] query message_resource failed: {e}", flush=True)
                 return None
 
         if not file_md5:
-            print(f"  [img] 未找到 MD5: local_id={local_id} t={timestamp}", flush=True)
+            print(f"  [img] MD5 not found: local_id={local_id} t={timestamp}", flush=True)
             return None
 
-        # 5. 查找 .dat 文件
+        # 5. Find .dat files
         attach_dir = os.path.join(WECHAT_BASE_DIR, "msg", "attach")
         username_hash = hashlib.md5(username.encode()).hexdigest()
         search_base = os.path.join(attach_dir, username_hash)
 
         if not os.path.isdir(search_base):
-            print(f"  [img] attach 目录不存在: {search_base}", flush=True)
+            print(f"  [img] attach directory not found: {search_base}", flush=True)
             return None
 
         pattern = os.path.join(search_base, "*", "Img", f"{file_md5}*.dat")
         dat_files = sorted(glob_mod.glob(pattern))
         if not dat_files:
-            print(f"  [img] 未找到 .dat: MD5={file_md5}", flush=True)
+            print(f"  [img] .dat not found: MD5={file_md5}", flush=True)
             return None
 
-        # 分类 .dat 文件
-        # 优先级: 原图.dat(最大) > _h.dat > _W.dat > _t.dat(缩略图)
+        # Classify .dat files
+        # Priority: original.dat (largest) > _h.dat > _W.dat > _t.dat (thumbnail)
         ranked = []
         for f in dat_files:
             fname = os.path.basename(f).lower()
             sz = os.path.getsize(f)
             if '_t_' in fname:
-                rank = 5  # _t_W.dat 缩略图变体
+                rank = 5  # _t_W.dat thumbnail variant
             elif '_t.' in fname:
-                rank = 4  # _t.dat 缩略图
+                rank = 4  # _t.dat thumbnail
             elif '_w.' in fname:
-                rank = 2  # _W.dat (V2 可转 JPEG)
+                rank = 2  # _W.dat (V2 can convert to JPEG)
             elif '_h.' in fname:
-                rank = 1  # 高清
+                rank = 1  # high-res
             elif fname == f"{file_md5}.dat".lower():
-                rank = 0  # 原图 (最优先)
+                rank = 0  # original (highest priority)
             else:
                 rank = 0
             ranked.append((rank, sz, f))
         ranked.sort(key=lambda x: (x[0], -x[1]))
 
-        # 6. 解密图片
+        # 6. Decrypt image
         os.makedirs(DECODED_IMAGE_DIR, exist_ok=True)
         out_base = os.path.join(DECODED_IMAGE_DIR, file_md5)
         rank_names = {0: 'orig', 1: 'h', 2: 'W', 4: 't', 5: 't_W'}
         browser_formats = ('jpg', 'png', 'gif', 'webp')
 
-        # 已有可用缓存则跳过
+        # Skip if usable cache already exists
         for ext in browser_formats:
             candidate = f"{out_base}.{ext}"
             if os.path.exists(candidate):
@@ -668,31 +668,31 @@ class SessionMonitor:
                 if cached_sz > 20480 or best_rank >= 4:
                     return os.path.basename(candidate)
                 os.unlink(candidate)
-                print(f"  [img] 缩略图升级: {cached_sz/1024:.0f}KB → 重解密", flush=True)
+                print(f"  [img] thumbnail upgrade: {cached_sz/1024:.0f}KB → re-decrypt", flush=True)
                 break
 
         for rank, sz, selected in ranked:
             sel_type = rank_names.get(rank, '?')
-            print(f"  [img] 尝试 {sel_type}({sz/1024:.0f}KB): {os.path.basename(selected)}", flush=True)
+            print(f"  [img] trying {sel_type}({sz/1024:.0f}KB): {os.path.basename(selected)}", flush=True)
 
             if is_v2_format(selected) and not IMAGE_AES_KEY:
-                print(f"  [img] V2 格式缺少 AES key, 跳过", flush=True)
+                print(f"  [img] V2 format missing AES key, skip", flush=True)
                 continue
 
             result_path, fmt = decrypt_dat_file(selected, f"{out_base}.tmp", IMAGE_AES_KEY, IMAGE_XOR_KEY)
             if not result_path:
-                print(f"  [img] 解密失败, 跳过", flush=True)
+                print(f"  [img] decrypt failed, skip", flush=True)
                 continue
 
-            # HEVC/wxgf → 用 pillow-heif 转 JPEG
+            # HEVC/wxgf → convert to JPEG using pillow-heif
             if fmt in ('hevc', 'bin'):
                 jpg_path = _convert_hevc_to_jpeg(result_path, f"{out_base}.jpg")
                 os.unlink(result_path)
                 if jpg_path:
                     size_kb = os.path.getsize(jpg_path) / 1024
-                    print(f"  [img] HEVC→JPEG 成功: {os.path.basename(jpg_path)} ({size_kb:.0f}KB)", flush=True)
+                    print(f"  [img] HEVC→JPEG success: {os.path.basename(jpg_path)} ({size_kb:.0f}KB)", flush=True)
                     return os.path.basename(jpg_path)
-                print(f"  [img] HEVC→JPEG 转换失败, 尝试下一个", flush=True)
+                print(f"  [img] HEVC→JPEG conversion failed, trying next", flush=True)
                 continue
 
             final = f"{out_base}.{fmt}"
@@ -700,20 +700,20 @@ class SessionMonitor:
                 os.unlink(final)
             os.rename(result_path, final)
             size_kb = os.path.getsize(final) / 1024
-            print(f"  [img] 解密成功: {os.path.basename(final)} ({size_kb:.0f}KB)", flush=True)
+            print(f"  [img] decrypt success: {os.path.basename(final)} ({size_kb:.0f}KB)", flush=True)
             return os.path.basename(final)
 
-        print(f"  [img] 所有 .dat 均无法解密", flush=True)
+        print(f"  [img] all .dat files failed to decrypt", flush=True)
         return '__v2_unsupported__'
 
     def _async_resolve_image(self, username, timestamp, msg_data):
-        """后台线程: 解密图片并通过 SSE 推送更新"""
+        """Background thread: decrypt image and push update via SSE"""
         delays = [0.3, 1.0, 2.0]
         for attempt in range(3):
             try:
                 img_name = self.resolve_image(username, timestamp)
                 if img_name == '__v2_unsupported__':
-                    msg_data['content'] = '[图片 - 新加密格式暂不支持预览]'
+                    msg_data['content'] = '[Image - new encryption format not yet supported for preview]'
                     broadcast_sse({
                         'event': 'image_update',
                         'timestamp': timestamp,
@@ -730,17 +730,17 @@ class SessionMonitor:
                         'username': username,
                         'image_url': image_url,
                     })
-                    print(f"  [img] 异步解密成功: {img_name}", flush=True)
+                    print(f"  [img] async decrypt success: {img_name}", flush=True)
                     return
                 elif attempt < 2:
                     time.sleep(delays[attempt])
             except Exception as e:
-                print(f"  [img] 异步解密失败(attempt={attempt}): {e}", flush=True)
+                print(f"  [img] async decrypt failed (attempt={attempt}): {e}", flush=True)
                 if attempt < 2:
                     time.sleep(delays[attempt])
 
     def _fresh_decrypt_query(self, db_key, table_name, prev_ts, curr_ts):
-        """独立解密 message DB 到临时文件并查询，避免共享缓存竞态"""
+        """Independently decrypt message DB to a temp file and query, avoiding shared cache race conditions"""
         key_info = get_key_info(self.db_cache.keys, db_key)
         if not key_info:
             return []
@@ -760,7 +760,7 @@ class SessionMonitor:
             if os.path.exists(wal_path):
                 decrypt_wal_full(wal_path, tmp_path, enc_key)
             ms = (time.perf_counter() - t0) * 1000
-            print(f"  [hidden] {db_key} 独立解密 {ms:.0f}ms", flush=True)
+            print(f"  [hidden] {db_key} independent decrypt {ms:.0f}ms", flush=True)
 
             conn = sqlite3.connect(f"file:{tmp_path}?mode=ro", uri=True)
             rows = conn.execute(f"""
@@ -772,7 +772,7 @@ class SessionMonitor:
             conn.close()
             return rows
         except Exception as e:
-            print(f"  [hidden] {db_key} 独立解密失败: {e}", flush=True)
+            print(f"  [hidden] {db_key} independent decrypt failed: {e}", flush=True)
             return []
         finally:
             try:
@@ -781,17 +781,17 @@ class SessionMonitor:
                 pass
 
     def _lookup_latest_message(self, username, timestamp):
-        """从 message_N.db 查指定 username 在 timestamp 的最新一条消息，返回
-        (local_id, message_content)。
+        """Query message_N.db for the latest message from username at timestamp, returns
+        (local_id, message_content).
 
-        SessionTable 推送时调用：
-        - local_id 加入 _shown_keys，供 `_check_hidden_messages` 精确去重 (issue #79)
-        - message_content 用于替换 SessionTable.summary 的 ~80 字短截断 (issue #42)
+        Called when pushing SessionTable:
+        - local_id added to _shown_keys for precise dedup by `_check_hidden_messages` (issue #79)
+        - message_content used to replace SessionTable.summary's ~80-char truncation (issue #42)
 
-        两者本就同行，合并到一次 SELECT，相比原 MAX(local_id) 不增加 IO。
+        Both are on the same row, combined into one SELECT, no extra IO vs original MAX(local_id).
 
-        时机风险：SessionTable 写入比 message DB 早几毫秒，可能查不到。查不到时返回
-        (None, None)，调用方跳过加 key，由 `_check_hidden_messages` 兜底。
+        Timing risk: SessionTable writes a few ms before message DB, may not find it. Returns
+        (None, None) when not found, caller skips adding key, `_check_hidden_messages` handles as fallback.
         """
         if not self.db_cache or not self.username_db_map:
             return None, None
@@ -800,9 +800,9 @@ class SessionMonitor:
             return None, None
         table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
         for db_key in db_keys:
-            # 用 peek 不触发同步解密 (主线程 hot path)。如果缓存还 stale
-            # 没 latest_local_id, 让 hidden 异步路径稍后兜底加 _shown_keys。
-            # 见 MonitorDBCache.peek 注释关于为什么这里不能用 .get。
+            # Use peek to avoid triggering synchronous decryption (main thread hot path). If cache is still stale
+            # and latest_local_id not found, let hidden async path add to _shown_keys later as fallback.
+            # See MonitorDBCache.peek comments about why .get cannot be used here.
             dec_path = self.db_cache.peek(db_key)
             if not dec_path:
                 continue
@@ -823,8 +823,8 @@ class SessionMonitor:
                                 mc = mc.decode('utf-8', errors='replace')
                         elif isinstance(mc, bytes):
                             mc = mc.decode('utf-8', errors='replace')
-                        # 群消息 message_content 形如 'wxid_xxx:\n<正文>'，与
-                        # SessionTable.summary 调用方一致地剥离前缀
+                        # Group message_content looks like 'wxid_xxx:\n<body>', strip prefix
+                        # consistent with SessionTable.summary caller
                         if mc and ':\n' in mc:
                             mc = mc.split(':\n', 1)[1]
                         return local_id, mc
@@ -833,9 +833,9 @@ class SessionMonitor:
         return None, None
 
     def _check_hidden_messages(self, username, prev_ts, curr_ts, curr_msg_type, display, is_group, sender):
-        """检查时间窗口内是否有被 session 摘要覆盖的消息（文字、图片、表情等）
+        """Check if there are messages within the time window that were overwritten by session summary (text, images, emoji, etc.)
 
-        先用共享缓存查询（快），失败或可疑时用独立解密（慢但可靠）。
+        First queries with shared cache (fast), falls back to independent decrypt when failed or suspicious (slow but reliable).
         """
         if not self.username_db_map:
             return
@@ -844,12 +844,12 @@ class SessionMonitor:
             return
 
         table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
-        print(f"  [hidden] 检查 {display[:15]} prev_ts={prev_ts} curr_ts={curr_ts} type={curr_msg_type}", flush=True)
+        print(f"  [hidden] checking {display[:15]} prev_ts={prev_ts} curr_ts={curr_ts} type={curr_msg_type}", flush=True)
 
-        # 等待 message DB 写入完成
+        # Wait for message DB write to complete
         time.sleep(1.0)
 
-        # 快速路径: 用共享缓存查询（带重试）
+        # Fast path: query with shared cache (with retry)
         all_rows = []
         cache_failed = False
         for _try in range(3):
@@ -870,22 +870,22 @@ class SessionMonitor:
                         conn.close()
                         all_rows.extend(rows)
                     except Exception as e:
-                        print(f"  [hidden] 缓存查询失败 {db_key}: {e}", flush=True)
+                        print(f"  [hidden] cache query failed {db_key}: {e}", flush=True)
                         cache_failed = True
                         break
-            # 检查是否找到了 curr_ts 的消息（说明缓存是最新的）
-            # 注: r[1] 是 create_time（新 schema：local_id, create_time, local_type, ...）
+            # Check if curr_ts message was found (indicates cache is up-to-date)
+            # Note: r[1] is create_time (new schema: local_id, create_time, local_type, ...)
             has_curr = any(r[1] == curr_ts for r in all_rows)
             if has_curr or cache_failed:
                 break
-            # 缓存可能还没更新到最新数据，短暂等待后重试
+            # Cache may not yet contain latest data, wait briefly and retry
             if _try < 2:
                 time.sleep(1.5)
-                print(f"  [hidden] 缓存未包含最新消息，重试({_try+1})...", flush=True)
+                print(f"  [hidden] cache does not contain latest message, retry({_try+1})...", flush=True)
 
-        # 仅在缓存查询出错时才用昂贵的独立解密
+        # Only use expensive independent decryption when cache query errors occur
         if cache_failed:
-            print(f"  [hidden] 缓存异常，启动独立解密...", flush=True)
+            print(f"  [hidden] cache error, starting independent decrypt...", flush=True)
             all_rows = []
             for db_key in db_keys:
                 rows = self._fresh_decrypt_query(db_key, table_name, prev_ts, curr_ts)
@@ -893,18 +893,18 @@ class SessionMonitor:
                 if rows:
                     break
         else:
-            print(f"  [hidden] 缓存查到 {len(all_rows)} 条", flush=True)
+            print(f"  [hidden] cache found {len(all_rows)} rows", flush=True)
 
-        # 过滤出隐藏消息
-        # 去重 key 用 local_id（之前用 (username, ts, base) 太粗，同秒同类型多条会被
-        # 误判为重复，导致 issue #79 的 "10 丢 4"）
+        # Filter out hidden messages
+        # Dedup key uses local_id (previously used (username, ts, base) which was too coarse, multiple
+        # messages of same type in same second would be wrongly treated as duplicates, causing "10 drop 4" in issue #79)
         hidden_msgs = []
         for local_id, ts, lt, mc, ct in all_rows:
             base = lt % 4294967296 if lt > 4294967296 else lt
-            # 跳过已显示的消息（按 local_id 精确去重）
+            # Skip already-displayed messages (precise dedup by local_id)
             if (username, local_id) in self._shown_keys:
                 continue
-            # 解压 zstd
+            # Decompress zstd
             if isinstance(mc, bytes) and ct == 4:
                 try:
                     mc = _zstd_dctx.decompress(mc).decode('utf-8', errors='replace')
@@ -914,7 +914,7 @@ class SessionMonitor:
                 mc = mc.decode('utf-8', errors='replace')
             hidden_msgs.append((local_id, ts, base, mc or ''))
 
-        print(f"  [hidden] 找到 {len(hidden_msgs)} 条隐藏消息", flush=True)
+        print(f"  [hidden] found {len(hidden_msgs)} hidden messages", flush=True)
 
         if not hidden_msgs:
             return
@@ -931,36 +931,36 @@ class SessionMonitor:
                 'sender': sender,
             }
             if base == 3:
-                # 隐藏的图片消息
+                # Hidden image message
                 time.sleep(0.5)
                 img_name = self.resolve_image(username, ts)
                 if img_name and img_name != '__v2_unsupported__':
                     msg_data.update({
-                        'type': '图片', 'type_icon': '\U0001f5bc\ufe0f',
+                        'type': 'Image', 'type_icon': '\U0001f5bc\ufe0f',
                         'content': '', 'image_url': f'/img/{img_name}',
                     })
-                    print(f"  [hidden] 补充图片: {img_name} t={ts}", flush=True)
+                    print(f"  [hidden] added image: {img_name} t={ts}", flush=True)
                 else:
                     continue
             elif base == 1:
-                # 隐藏的文字消息
+                # Hidden text message
                 msg_data.update({
-                    'type': '文本', 'type_icon': '\U0001f4ac',
+                    'type': 'Text', 'type_icon': '\U0001f4ac',
                     'content': mc,
                 })
-                print(f"  [hidden] 补充文字: {mc[:30]} t={ts}", flush=True)
+                print(f"  [hidden] added text: {mc[:30]} t={ts}", flush=True)
             elif base == 47:
-                # 隐藏的表情消息
+                # Hidden emoji message
                 rich = self.resolve_rich_content(username, ts, 47)
                 msg_data.update({
-                    'type': '表情', 'type_icon': '\U0001f600',
-                    'content': '[表情]',
+                    'type': 'Emoji', 'type_icon': '\U0001f600',
+                    'content': '[emoji]',
                 })
                 if rich:
                     msg_data['rich_content'] = rich
-                print(f"  [hidden] 补充表情 t={ts}", flush=True)
+                print(f"  [hidden] added emoji t={ts}", flush=True)
             elif base == 49:
-                # 隐藏的富媒体消息
+                # Hidden rich media message
                 rich = self.resolve_rich_content(username, ts, 49)
                 msg_data.update({
                     'type': format_msg_type(base), 'type_icon': msg_type_icon(base),
@@ -968,14 +968,14 @@ class SessionMonitor:
                 })
                 if rich:
                     msg_data['rich_content'] = rich
-                print(f"  [hidden] 补充富媒体 t={ts}", flush=True)
+                print(f"  [hidden] added rich media t={ts}", flush=True)
             else:
-                # 其他类型
+                # Other types
                 msg_data.update({
                     'type': format_msg_type(base), 'type_icon': msg_type_icon(base),
                     'content': mc[:100] if mc else f'[{format_msg_type(base)}]',
                 })
-                print(f"  [hidden] 补充type={base} t={ts}", flush=True)
+                print(f"  [hidden] added type={base} t={ts}", flush=True)
 
             with messages_lock:
                 messages_log.append(msg_data)
@@ -984,10 +984,10 @@ class SessionMonitor:
             broadcast_sse(msg_data)
 
     def _query_msg_content(self, username, timestamp, base_type):
-        """通用: 从 message_*.db 查找指定类型消息的 XML 内容
+        """General: find XML content of a specified message type from message_*.db
 
-        base_type: 基础类型 (47, 49, 43, 34 等)
-        微信4.0 的 local_type 是复合编码: (sub_type << 32) | base_type
+        base_type: base type (47, 49, 43, 34, etc.)
+        WeChat 4.0 local_type is composite encoding: (sub_type << 32) | base_type
         """
         db_keys = self.username_db_map.get(username, [])
         if not db_keys:
@@ -1011,7 +1011,7 @@ class SessionMonitor:
                     conn.close()
 
                     if not row:
-                        break  # 表存在但没找到匹配行，换下一个 DB
+                        break  # table exists but no matching row found, try next DB
                     mc, ct_flag, full_type = row
                     if isinstance(mc, bytes) and ct_flag == 4:
                         mc = _zstd_dctx.decompress(mc).decode('utf-8', errors='replace')
@@ -1032,23 +1032,23 @@ class SessionMonitor:
 
                 except Exception as e:
                     if 'malformed' in str(e) and _try == 0:
-                        print(f"  [rich] {dk} malformed, 强制刷新...", flush=True)
+                        print(f"  [rich] {dk} malformed, force refresh...", flush=True)
                         self.db_cache.invalidate(dk)
                         continue
                     if 'no such table' not in str(e):
-                        print(f"  [rich] 查询 {dk} 失败: {e}", flush=True)
+                        print(f"  [rich] query {dk} failed: {e}", flush=True)
                     break
         return None
 
     def _parse_rich_content(self, username, timestamp, msg_type):
-        """解析富媒体消息, 返回 dict 或 None"""
+        """Parse rich media message, returns dict or None"""
         import xml.etree.ElementTree as ET
 
         if msg_type == 47:
-            # --- 表情 ---
+            # --- Emoji ---
             result = self._query_msg_content(username, timestamp, 47)
             if not result:
-                print(f"  [emoji] 查询失败 user={username[:10]} ts={timestamp}", flush=True)
+                print(f"  [emoji] query failed user={username[:10]} ts={timestamp}", flush=True)
                 return None
             mc, _ = result
             if '<emoji' not in mc:
@@ -1060,30 +1060,30 @@ class SessionMonitor:
                     return None
                 md5 = emoji.get('md5', '')
                 etype = emoji.get('type', '')
-                # 优先用 XML 中的 URL
+                # Prefer URL from XML
                 url = emoji.get('thumburl') or emoji.get('externurl') or emoji.get('cdnurl') or ''
                 url = url.replace('&amp;', '&')
                 if url and url.startswith('http'):
-                    print(f"  [emoji] XML有URL md5={md5[:12]} type={etype}", flush=True)
+                    print(f"  [emoji] XML has URL md5={md5[:12]} type={etype}", flush=True)
                     return {'type': 'emoji', 'emoji_url': url}
-                # XML 无 URL → 从 emoticon.db 下载
+                # No URL in XML → download from emoticon.db
                 if md5:
                     with _emoji_lookup_lock:
                         in_lookup = md5 in _emoji_lookup
                         lookup_size = len(_emoji_lookup)
-                    print(f"  [emoji] XML无URL md5={md5[:12]} type={etype} lookup={lookup_size} found={in_lookup}", flush=True)
+                    print(f"  [emoji] XML no URL md5={md5[:12]} type={etype} lookup={lookup_size} found={in_lookup}", flush=True)
                     img_name = _download_emoji(md5)
                     if img_name:
                         return {'type': 'emoji', 'emoji_url': f'/img/{img_name}'}
-                    print(f"  [emoji] 下载失败 md5={md5[:12]}", flush=True)
+                    print(f"  [emoji] download failed md5={md5[:12]}", flush=True)
                 else:
-                    print(f"  [emoji] 无md5 type={etype}", flush=True)
+                    print(f"  [emoji] no md5 type={etype}", flush=True)
             except ET.ParseError:
                 pass
             return None
 
         elif msg_type == 49:
-            # --- 链接/文件/引用/公众号/小程序 ---
+            # --- Link/File/Quote/Official Account/Mini App ---
             result = self._query_msg_content(username, timestamp, 49)
             if not result:
                 return None
@@ -1102,7 +1102,7 @@ class SessionMonitor:
                 app_type = int(appmsg.findtext('type') or sub_type or 0)
 
                 if app_type == 57:
-                    # 引用回复: title 是回复内容
+                    # Quote reply: title is the reply content
                     ref = appmsg.find('.//refermsg')
                     ref_name = ref.findtext('displayname') if ref is not None else ''
                     ref_content = ref.findtext('content') if ref is not None else ''
@@ -1115,7 +1115,7 @@ class SessionMonitor:
                         'ref_content': ref_content or '',
                     }
                 elif app_type == 6:
-                    # 文件
+                    # File
                     attach = appmsg.find('.//appattach')
                     size = int(attach.findtext('totallen') or 0) if attach is not None else 0
                     ext = (attach.findtext('fileext') or '') if attach is not None else ''
@@ -1126,13 +1126,13 @@ class SessionMonitor:
                         'file_size': size,
                     }
                 elif app_type == 5:
-                    # 链接/文章 — 清理 tracking 参数
+                    # Link/article — clean tracking parameters
                     clean_url = url
                     if 'mp.weixin.qq.com' in url:
                         from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
                         pu = urlparse(url)
                         params = parse_qs(pu.query, keep_blank_values=False)
-                        # 只保留文章必要参数
+                        # Keep only essential article parameters
                         keep = {k: v for k, v in params.items()
                                 if k in ('__biz', 'mid', 'idx', 'sn', 'chksm')}
                         clean_url = urlunparse(pu._replace(
@@ -1146,7 +1146,7 @@ class SessionMonitor:
                         'source': source,
                     }
                 elif app_type == 33 or app_type == 36:
-                    # 小程序
+                    # Mini App
                     source = (appmsg.findtext('sourcedisplayname') or '').strip()
                     return {
                         'type': 'miniapp',
@@ -1155,13 +1155,13 @@ class SessionMonitor:
                         'url': url,
                     }
                 elif app_type == 51:
-                    # 视频号
+                    # Channels (Video accounts)
                     return {
                         'type': 'channels',
-                        'title': title or '视频号内容',
+                        'title': title or 'Channels content',
                     }
                 elif app_type == 19:
-                    # 聊天记录转发 — 解析 recorditem 获取消息列表
+                    # Chat history forward — parse recorditem to get message list
                     items = []
                     ri = appmsg.findtext('recorditem') or ''
                     if ri:
@@ -1183,27 +1183,27 @@ class SessionMonitor:
                         'items': items,
                     }
                 elif app_type == 2000:
-                    # 微信转账 — 复用 mcp_server 已有的解析器，单一来源避免字段漂移
-                    # （snake/camel 大小写、未来新 paysubtype 兜底）。
-                    import mcp_server  # 已被 chat_export_helpers 验证 import 安全
+                    # WeChat transfer — reuse existing mcp_server parser, single source to avoid field drift
+                    # (snake/camel casing, future new paysubtype fallback).
+                    import mcp_server  # import safety verified by chat_export_helpers
                     info = mcp_server._extract_transfer_info(appmsg) or {}
                     pay_memo = info.get('pay_memo', '')
                     paysubtype = info.get('paysubtype', '')
-                    # 已知 paysubtype 显示中文 label；未知用空串而非"未知(paysubtype=N)"，
-                    # 避免 UI 出现内部诊断字串。日志侧若需要可看 chat history。
+                    # Known paysubtype shows label; unknown uses empty string instead of "Unknown(paysubtype=N)",
+                    # avoiding internal diagnostic strings in UI. Check chat history on log side if needed.
                     direction = (info.get('paysubtype_label', '')
                                  if paysubtype in mcp_server._TRANSFER_PAYSUBTYPE_LABEL
                                  else '')
                     return {
                         'type': 'transfer',
-                        'title': title or '微信转账',
+                        'title': title or 'WeChat Transfer',
                         'direction': direction,
                         'paysubtype': paysubtype,
                         'fee_desc': info.get('fee_desc', ''),
                         'pay_memo': pay_memo[:200] if pay_memo else '',
                     }
                 else:
-                    # 其他子类型: 用 title 显示
+                    # Other subtypes: display using title
                     if title:
                         return {
                             'type': 'link',
@@ -1216,7 +1216,7 @@ class SessionMonitor:
             return None
 
         elif msg_type == 43:
-            # --- 视频 ---
+            # --- Video ---
             result = self._query_msg_content(username, timestamp, 43)
             if not result:
                 return None
@@ -1236,7 +1236,7 @@ class SessionMonitor:
             return None
 
         elif msg_type == 34:
-            # --- 语音 ---
+            # --- Voice ---
             result = self._query_msg_content(username, timestamp, 34)
             if not result:
                 return None
@@ -1258,7 +1258,7 @@ class SessionMonitor:
         return None
 
     def _async_resolve_rich(self, username, timestamp, msg_type, msg_data):
-        """后台线程: 解析富媒体内容并推送 SSE（带重试）"""
+        """Background thread: parse rich media content and push SSE (with retry)"""
         delays = [0.5, 1.5, 3.0]
         for attempt in range(3):
             try:
@@ -1272,14 +1272,14 @@ class SessionMonitor:
                         'username': username,
                         'rich': info,
                     })
-                    print(f"  [rich] {info['type']} 解析成功", flush=True)
+                    print(f"  [rich] {info['type']} parse success", flush=True)
                     return
             except Exception as e:
-                print(f"  [rich] 解析失败: {e}", flush=True)
-        print(f"  [rich] type={msg_type} 3次重试均失败: {username}", flush=True)
+                print(f"  [rich] parse failed: {e}", flush=True)
+        print(f"  [rich] type={msg_type} all 3 retries failed: {username}", flush=True)
 
     def query_state(self):
-        """查询已解密副本的session状态"""
+        """Query session state from decrypted copy"""
         conn = sqlite3.connect(f"file:{DECRYPTED_SESSION}?mode=ro", uri=True)
         state = {}
         for r in conn.execute("""
@@ -1295,13 +1295,13 @@ class SessionMonitor:
         return state
 
     def do_full_refresh(self):
-        """全量解密DB + 全量WAL patch"""
-        # 先解密主DB
+        """Full DB decrypt + full WAL patch"""
+        # Decrypt main DB first
         pages, ms = full_decrypt(self.session_db, DECRYPTED_SESSION, self.enc_key)
         total_ms = ms
         wal_patched = 0
 
-        # 再patch所有WAL frames
+        # Then patch all WAL frames
         if os.path.exists(self.wal_path):
             wal_patched, ms2 = decrypt_wal_full(self.wal_path, DECRYPTED_SESSION, self.enc_key)
             total_ms += ms2
@@ -1318,21 +1318,21 @@ class SessionMonitor:
             t1 = time.perf_counter()
             curr_state = self.query_state()
             t2 = time.perf_counter()
-            print(f"  [perf] decrypt={self.patched_pages}页/{(t1-t0)*1000:.1f}ms, query={(t2-t1)*1000:.1f}ms", flush=True)
+            print(f"  [perf] decrypt={self.patched_pages}pg/{(t1-t0)*1000:.1f}ms, query={(t2-t1)*1000:.1f}ms", flush=True)
         except Exception as e:
             print(f"  [ERROR] check_updates: {e}", flush=True)
             return
 
-        # 收集所有新消息，按时间排序后再推送
+        # Collect all new messages, sort by time before pushing
         new_msgs = []
         for username, curr in curr_state.items():
             prev = self.prev_state.get(username)
-            # 检测: 时间戳变化 OR 同一秒内消息类型变化（文字+图片组合）
+            # Detect: timestamp change OR msg type change within the same second (text+image combo)
             is_new = prev and (curr['timestamp'] > prev['timestamp'] or
                                (curr['timestamp'] == prev['timestamp'] and curr['msg_type'] != prev.get('msg_type')))
             if is_new:
-                # contact.db mtime 变化时刷新缓存：覆盖新增联系人、改名、改备注、群名
-                # 修改等场景（issue #46, #67）。受 cooldown 节流。
+                # Refresh cache when contact.db mtime changes: covers new contacts, renames, remark changes, group name
+                # changes (issue #46, #67). Throttled by cooldown.
                 self._maybe_refresh_contacts()
                 display = self.contact_names.get(username, username)
                 is_group = '@chatroom' in username
@@ -1345,7 +1345,7 @@ class SessionMonitor:
                     try:
                         summary = _zstd_dctx.decompress(summary).decode('utf-8', errors='replace')
                     except Exception:
-                        summary = '(压缩内容)'
+                        summary = '(compressed content)'
                 if summary and ':\n' in summary:
                     summary = summary.split(':\n', 1)[1]
 
@@ -1365,34 +1365,34 @@ class SessionMonitor:
                 }
 
                 new_msgs.append(msg_data)
-                # _shown_keys 改用 (username, local_id) 精确去重（issue #79）。
-                # SessionTable 不带 local_id，去 message_N.db 查同时拿 local_id 和完整正文：
-                # - local_id 用于去重
-                # - 完整正文替换 SessionTable.summary 的 ~80 字短截断（issue #42）
-                # 查不到时（message DB 写入滞后于 SessionTable）跳过加 key，让 _check_hidden_messages
-                # 1 秒后查到时自己 emit 并加 key。这种情况下偶发轻微重复，但比丢消息好。
+                # _shown_keys now uses (username, local_id) for precise dedup (issue #79).
+                # SessionTable lacks local_id, so query message_N.db to get both local_id and full content:
+                # - local_id for dedup
+                # - full content replaces SessionTable.summary's ~80-char truncation (issue #42)
+                # When not found (message DB write lags SessionTable) skip adding key, let _check_hidden_messages
+                # emit and add key when it finds it 1 second later. Occasional mild duplicates in this case, but better than missing messages.
                 latest_local_id, full_content = self._lookup_latest_message(username, curr['timestamp'])
                 if latest_local_id is not None:
                     self._shown_keys.add((username, latest_local_id))
                     if full_content and len(full_content) > len(msg_data['content']):
                         msg_data['content'] = full_content
 
-                # 图片消息: 后台异步解密（不阻塞轮询）
+                # Image message: background async decrypt (non-blocking polling)
                 if curr['msg_type'] == 3:
                     _img_executor.submit(
                         self._async_resolve_image,
                         username, curr['timestamp'], msg_data
                     )
 
-                # 富媒体消息: 后台解析内容
+                # Rich media message: parse content in background
                 if curr['msg_type'] in (47, 49, 43, 34):
                     _img_executor.submit(
                         self._async_resolve_rich,
                         username, curr['timestamp'], curr['msg_type'], msg_data
                     )
 
-                # 检查时间窗口内是否有被 session 摘要覆盖的消息
-                # (比如用户发了 图片+文字，session只记录最后一条)
+                # Check if there are messages in the time window overwritten by session summary
+                # (e.g. user sent image+text, session only records the last one)
                 prev_ts = prev['timestamp'] if prev else curr['timestamp'] - 5
                 _hidden_executor.submit(
                     self._check_hidden_messages,
@@ -1400,7 +1400,7 @@ class SessionMonitor:
                     display, is_group, sender
                 )
 
-        # 按时间排序
+        # Sort by time
         new_msgs.sort(key=lambda m: m['timestamp'])
 
         for msg in new_msgs:
@@ -1418,17 +1418,17 @@ class SessionMonitor:
                 sender = msg['sender']
                 now_str = datetime.fromtimestamp(now).strftime('%H:%M:%S')
                 if sender:
-                    print(f"[{msg['time']} 延迟={msg_age:.1f}s] [{msg['chat']}] {sender}: {msg['content']}  ({tag})", flush=True)
+                    print(f"[{msg['time']} delay={msg_age:.1f}s] [{msg['chat']}] {sender}: {msg['content']}  ({tag})", flush=True)
                 else:
-                    print(f"[{msg['time']} 延迟={msg_age:.1f}s] [{msg['chat']}] {msg['content']}  ({tag})", flush=True)
+                    print(f"[{msg['time']} delay={msg_age:.1f}s] [{msg['chat']}] {msg['content']}  ({tag})", flush=True)
             except Exception:
-                pass  # Windows CMD编码问题，不影响SSE推送
+                pass  # Windows CMD encoding issue, does not affect SSE push
 
         self.prev_state = curr_state
 
-        # 清理 _shown_keys（按数量上限）：local_id 不是时间戳不能按时间 prune。
-        # 超过 10000 时保留 local_id 最大的 5000 条（最新消息优先）。
-        # 实际触发频率：~几小时一次，set lookup 仍是 O(1)。
+        # Prune _shown_keys (by count limit): local_id is not a timestamp so cannot prune by time.
+        # When exceeding 10000, keep 5000 entries with largest local_id (newest messages first).
+        # Actual trigger frequency: ~every few hours, set lookup remains O(1).
         if len(self._shown_keys) > 10000:
             by_local_id = sorted(self._shown_keys, key=lambda k: k[1], reverse=True)
             self._shown_keys = set(by_local_id[:5000])
@@ -1437,21 +1437,21 @@ def monitor_thread(enc_key, session_db, contact_names, db_cache=None, username_d
     mon = SessionMonitor(enc_key, session_db, contact_names, db_cache, username_db_map)
     wal_path = mon.wal_path
 
-    # 初始全量解密
+    # Initial full decryption
     pages, ms = full_decrypt(session_db, DECRYPTED_SESSION, enc_key)
     wal_patched = 0
     wal_ms = 0
     if os.path.exists(wal_path):
         wal_patched, wal_ms = decrypt_wal_full(wal_path, DECRYPTED_SESSION, enc_key)
-        print(f"[init] DB {pages}页/{ms:.0f}ms + WAL {wal_patched}页/{wal_ms:.0f}ms", flush=True)
+        print(f"[init] DB {pages}pg/{ms:.0f}ms + WAL {wal_patched}pg/{wal_ms:.0f}ms", flush=True)
     else:
-        print(f"[init] DB {pages}页/{ms:.0f}ms", flush=True)
+        print(f"[init] DB {pages}pg/{ms:.0f}ms", flush=True)
 
     mon.prev_state = mon.query_state()
-    print(f"[monitor] 跟踪 {len(mon.prev_state)} 个会话", flush=True)
-    print(f"[monitor] mtime轮询模式 (每{POLL_MS}ms)", flush=True)
+    print(f"[monitor] tracking {len(mon.prev_state)} sessions", flush=True)
+    print(f"[monitor] mtime polling mode (every {POLL_MS}ms)", flush=True)
 
-    # mtime-based 轮询: WAL是预分配固定大小，不能用size检测
+    # mtime-based polling: WAL is pre-allocated fixed size, cannot use size detection
     poll_interval = POLL_MS / 1000
     prev_wal_mtime = os.path.getmtime(wal_path) if os.path.exists(wal_path) else 0
     prev_db_mtime = os.path.getmtime(session_db)
@@ -1459,7 +1459,7 @@ def monitor_thread(enc_key, session_db, contact_names, db_cache=None, username_d
     while True:
         time.sleep(poll_interval)
         try:
-            # 用mtime检测WAL和DB变化
+            # Detect WAL and DB changes via mtime
             try:
                 wal_mtime = os.path.getmtime(wal_path) if os.path.exists(wal_path) else 0
                 db_mtime = os.path.getmtime(session_db)
@@ -1467,7 +1467,7 @@ def monitor_thread(enc_key, session_db, contact_names, db_cache=None, username_d
                 continue
 
             if wal_mtime == prev_wal_mtime and db_mtime == prev_db_mtime:
-                continue  # 无变化
+                continue  # no change
 
             t_detect = time.perf_counter()
             wal_changed = wal_mtime != prev_wal_mtime
@@ -1478,7 +1478,7 @@ def monitor_thread(enc_key, session_db, contact_names, db_cache=None, username_d
             t_done = time.perf_counter()
             try:
                 detect_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                print(f"  [{detect_str}] WAL={'变' if wal_changed else '-'} DB={'变' if db_changed else '-'} 总耗时={(t_done-t_detect)*1000:.1f}ms", flush=True)
+                print(f"  [{detect_str}] WAL={'changed' if wal_changed else '-'} DB={'changed' if db_changed else '-'} total={(t_done-t_detect)*1000:.1f}ms", flush=True)
             except Exception:
                 pass
 
@@ -1486,40 +1486,40 @@ def monitor_thread(enc_key, session_db, contact_names, db_cache=None, username_d
             prev_db_mtime = db_mtime
 
         except Exception as e:
-            print(f"[poll] 错误: {e}", flush=True)
+            print(f"[poll] error: {e}", flush=True)
             time.sleep(1)
 
 
 # ============ Web ============
 
 HTML_PAGE = '''<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>微信消息监听</title>
+<title>WeChat Message Monitor</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
-  /* 颜色 */
+  /* Colors */
   --bg:#0a0a0f;--bg-elev:#12121a;
   --surface:rgba(255,255,255,.04);--surface-hover:rgba(255,255,255,.07);
   --border:rgba(255,255,255,.08);--border-strong:rgba(255,255,255,.16);
   --text:#e8eaed;--text-dim:#9aa0a6;--text-faint:#5f6368;
   --accent:#4fc3f7;--accent-bg:rgba(79,195,247,.12);
   --success:#81c784;--warn:#ffd54f;--danger:#ef9a9a;
-  /* 4-step 间距 */
+  /* 4-step spacing */
   --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;
-  /* 4-step 字号 */
+  /* 4-step font sizes */
   --t1:11px;--t2:12px;--t3:13px;--t4:15px;--t5:18px;--t6:24px;
-  /* 圆角 */
+  /* Border radius */
   --r1:6px;--r2:10px;--r3:14px;--r-pill:999px;
-  /* 阴影 */
+  /* Shadows */
   --shadow-1:0 1px 2px rgba(0,0,0,.3);
   --shadow-2:0 8px 24px rgba(0,0,0,.4);
   --shadow-glow:0 0 0 1px var(--border),0 4px 14px rgba(79,195,247,.18);
 }
-/* 字体: 中文优先用苹方 / 思源, 避免 Segoe UI 把中文渲染糊 */
+/* Font: prefer PingFang / Source Han for Chinese, prevents Segoe UI from rendering Chinese blurry */
 body{
   font-family:"PingFang SC","HarmonyOS Sans","Source Han Sans CN","Microsoft YaHei UI",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
   background:radial-gradient(ellipse at top,#14142a 0%,#0a0a0f 60%) fixed;
@@ -1527,9 +1527,9 @@ body{
   height:100vh;display:flex;flex-direction:column;
   -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
 }
-/* 顶部 header: sticky + 防按钮被挤掉
-   原本用 backdrop-filter:blur(20px) 但每次 SSE 推消息触发 reflow 都要 GPU
-   重绘整个 header, 在低端机 / 高频消息时拖慢渲染。改用纯渐变背景。 */
+/* Top header: sticky + prevents buttons from being squeezed out
+   Originally used backdrop-filter:blur(20px) but every SSE message push triggers reflow requiring GPU
+   to redraw entire header, slowing rendering on low-end devices / high-frequency messages. Changed to pure gradient background. */
 .header{
   background:linear-gradient(135deg,#1a1a2e,#16213e);
   padding:14px 24px;
@@ -1594,7 +1594,7 @@ a.msg-link{text-decoration:none;color:inherit}
 .empty .icon{font-size:48px;margin-bottom:12px}
 ::-webkit-scrollbar{width:4px}
 ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:2px}
-/* 设置面板 */
+/* Settings panel */
 .settings-btn{background:none;border:1px solid var(--border-strong);color:var(--text-dim);font-size:16px;cursor:pointer;padding:6px 10px;border-radius:var(--r1);transition:all .2s;flex-shrink:0}
 .settings-btn:hover{color:var(--text);border-color:var(--accent);background:var(--accent-bg)}
 .settings-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:900}
@@ -1628,9 +1628,9 @@ a.msg-link{text-decoration:none;color:inherit}
 .rule-opts input[type=checkbox]{accent-color:#4caf50}
 .add-rule-btn{width:100%;padding:8px;background:rgba(79,195,247,.1);border:1px dashed rgba(79,195,247,.3);border-radius:6px;color:#4fc3f7;font-size:12px;cursor:pointer;transition:all .2s}
 .add-rule-btn:hover{background:rgba(79,195,247,.2)}
-/* 通知高亮 */
+/* Notification highlight */
 .msg.notify-hl{border-left:3px solid #ffd54f;background:rgba(255,213,79,.08);box-shadow:0 0 12px rgba(255,213,79,.1)}
-/* 导出筛选模态框 */
+/* Export filter modal */
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:1100;align-items:center;justify-content:center}
 .modal-overlay.show{display:flex;animation:fadeIn .15s ease-out}
 .modal{background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--r3);width:560px;max-width:90vw;max-height:85vh;display:flex;flex-direction:column;box-shadow:var(--shadow-2);overflow:hidden}
@@ -1669,35 +1669,35 @@ a.msg-link{text-decoration:none;color:inherit}
 .modal-btn.primary:hover:not(:disabled){background:linear-gradient(135deg,#5fd0ff,#3fc4ff);transform:translateY(-1px)}
 .modal-btn:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
 .modal-loading{text-align:center;color:var(--text-faint);padding:30px;font-size:var(--t3)}
-/* Icon 通用样式 (替代 emoji) */
+/* Icon generic styles (replaces emoji) */
 .i{width:16px;height:16px;display:inline-block;vertical-align:-3px;flex-shrink:0;color:inherit}
 .i-sm{width:13px;height:13px;vertical-align:-2px}
 .i-lg{width:20px;height:20px;vertical-align:-5px}
 .i-xl{width:32px;height:32px;vertical-align:middle}
 .spin{animation:spin 1s linear infinite;transform-origin:center}
 @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-/* 工具面板 (Web 版替代 tkinter app_gui.py) */
+/* Tools panel (Web version replacing tkinter app_gui.py) */
 .tools-btn{background:none;border:1px solid var(--border-strong);color:var(--text-dim);font-size:var(--t3);cursor:pointer;padding:6px 12px;border-radius:var(--r1);transition:all .2s;margin-left:var(--s2);flex-shrink:0;font-weight:500}
 .tools-btn:hover{color:var(--accent);border-color:var(--accent);background:var(--accent-bg)}
 #toolsPanel{display:none;background:var(--bg-elev);border-top:1px solid var(--border);padding:0;flex-shrink:0;max-height:60vh;overflow:hidden;flex-direction:column;box-shadow:inset 0 8px 16px -8px rgba(0,0,0,.4)}
 #toolsPanel.show{display:flex}
-/* Tab 头 — 加 hover 浮起 + active 渐变 + 顶部 strip */
+/* Tab header — adds hover lift + active gradient + top strip */
 .tool-tabs{display:flex;background:rgba(0,0,0,.3);border-bottom:1px solid var(--border);padding:0 var(--s5);gap:0;flex-shrink:0;position:relative}
 .tool-tab{position:relative;background:none;border:none;color:var(--text-faint);font-size:var(--t3);padding:14px 22px;cursor:pointer;transition:all .2s;font-family:inherit;font-weight:500;letter-spacing:.3px}
 .tool-tab:hover{color:var(--text);background:rgba(255,255,255,.03)}
 .tool-tab.active{color:var(--accent);background:linear-gradient(180deg,transparent,var(--accent-bg))}
 .tool-tab.active::after{content:'';position:absolute;left:22px;right:22px;bottom:0;height:2px;background:var(--accent);border-radius:2px 2px 0 0;box-shadow:0 0 8px rgba(79,195,247,.5)}
-/* Tab 内容 */
+/* Tab content */
 .tool-pane{display:none;padding:var(--s5);overflow:auto;flex:1}
 .tool-pane.active{display:block;animation:fadeIn .2s ease-out}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
-/* 前置条件 → 紧凑 chip (不再像 form error) */
+/* Prerequisite → compact chip (no longer looks like form error) */
 .tool-prereq{display:inline-flex;align-items:center;gap:var(--s2);background:rgba(255,213,79,.08);color:var(--warn);font-size:var(--t1);padding:6px 12px;border-radius:var(--r-pill);border:none;margin-bottom:var(--s4);font-weight:500;letter-spacing:.2px}
 .tool-prereq.info{background:rgba(79,195,247,.08);color:var(--accent)}
 .tool-step{margin-bottom:var(--s4)}
 .tool-step-label{font-size:var(--t1);color:var(--text-faint);margin-bottom:var(--s2);text-transform:uppercase;letter-spacing:1.2px;font-weight:600}
 .tools-row{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center}
-/* 默认按钮 — 安静 */
+/* Default button — quiet */
 .tool-task-btn{
   background:var(--surface);border:1px solid var(--border);
   color:var(--text);padding:10px 18px;border-radius:var(--r2);
@@ -1707,7 +1707,7 @@ a.msg-link{text-decoration:none;color:inherit}
 .tool-task-btn:hover:not(:disabled){background:var(--surface-hover);border-color:var(--border-strong);transform:translateY(-1px);box-shadow:var(--shadow-1)}
 .tool-task-btn:active:not(:disabled){transform:translateY(0)}
 .tool-task-btn:disabled{opacity:.4;cursor:not-allowed}
-/* primary 按钮 — 真 primary, 实心渐变 + 阴影 */
+/* primary button — true primary, solid gradient + shadow */
 .tool-task-btn.primary{
   background:linear-gradient(135deg,#4fc3f7,#29b6f6);
   border:none;color:#001528;font-weight:600;
@@ -1720,7 +1720,7 @@ a.msg-link{text-decoration:none;color:inherit}
   box-shadow:0 6px 20px rgba(79,195,247,.5),inset 0 1px 0 rgba(255,255,255,.3)
 }
 .tool-task-btn.primary:active:not(:disabled){transform:translateY(0);box-shadow:0 2px 8px rgba(79,195,247,.4)}
-/* 终止按钮 — 红色警示 */
+/* Cancel button — red warning */
 .tool-task-btn.cancel{
   background:linear-gradient(135deg,#ef5350,#e53935)!important;
   border:none!important;color:#fff!important;font-weight:600;
@@ -1732,7 +1732,7 @@ a.msg-link{text-decoration:none;color:inherit}
   box-shadow:0 6px 20px rgba(239,83,80,.6)!important;
 }
 @keyframes pulseRed{0%,100%{box-shadow:0 4px 14px rgba(239,83,80,.4)}50%{box-shadow:0 4px 20px rgba(239,83,80,.7)}}
-/* 日志框 */
+/* Log box */
 .tool-log-wrap{
   background:#05060a;border:1px solid var(--border);border-radius:var(--r2);
   padding:var(--s3) var(--s4);
@@ -1742,7 +1742,7 @@ a.msg-link{text-decoration:none;color:inherit}
   margin-top:var(--s4);
   box-shadow:inset 0 1px 3px rgba(0,0,0,.4);
 }
-.tool-log-wrap:empty::before{content:"点击上方按钮开始任务,日志会实时显示";color:var(--text-faint);font-style:italic}
+.tool-log-wrap:empty::before{content:"Click a button above to start a task, logs will appear in real time";color:var(--text-faint);font-style:italic}
 .tool-status{display:inline-block;font-size:var(--t2);padding:4px 12px;border-radius:var(--r-pill);margin-left:var(--s2);vertical-align:middle;font-weight:500}
 .tool-status.running{background:var(--accent-bg);color:var(--accent);border:1px solid rgba(79,195,247,.3)}
 .tool-status.ok{background:rgba(76,175,80,.15);color:var(--success);border:1px solid rgba(76,175,80,.3)}
@@ -1750,8 +1750,8 @@ a.msg-link{text-decoration:none;color:inherit}
 </style>
 </head>
 <body>
-<!-- SVG icon library (Lucide-style, stroke 2, viewBox 24x24). 一次性内嵌 ~1KB,
-     用 <svg class="i"><use href="#i-xxx"/></svg> 引用, currentColor 自动跟文字色。 -->
+<!-- SVG icon library (Lucide-style, stroke 2, viewBox 24x24). Inline ~1KB once,
+     reference with <svg class="i"><use href="#i-xxx"/></svg>, currentColor auto-follows text color. -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="i-wrench" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
   <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
@@ -1766,62 +1766,62 @@ a.msg-link{text-decoration:none;color:inherit}
 </svg>
 <div class="header">
 <h1>WeChat Monitor</h1>
-<div class="status ok" id="st">SSE 实时</div>
-<div class="stats"><span id="cnt">0 消息</span><span id="perf"></span></div>
-<button class="tools-btn" onclick="toggleTools()" title="工具箱 (解密 / 导出 / 企业微信)"><svg class="i"><use href="#i-wrench"/></svg> 工具</button>
-<button class="settings-btn" onclick="toggleSettings()" title="通知设置"><svg class="i"><use href="#i-settings"/></svg></button>
+<div class="status ok" id="st">SSE Live</div>
+<div class="stats"><span id="cnt">0 Messages</span><span id="perf"></span></div>
+<button class="tools-btn" onclick="toggleTools()" title="Toolbox (Decrypt / Export / Work WeChat)"><svg class="i"><use href="#i-wrench"/></svg> Tools</button>
+<button class="settings-btn" onclick="toggleSettings()" title="Notification Settings"><svg class="i"><use href="#i-settings"/></svg></button>
 </div>
 <div id="toolsPanel">
   <div class="tool-tabs">
-    <button class="tool-tab active" data-pane="wechat"><svg class="i"><use href="#i-chat"/></svg> 个人微信</button>
-    <button class="tool-tab" data-pane="wxwork"><svg class="i"><use href="#i-briefcase"/></svg> 企业微信</button>
-    <button class="tool-tab" data-pane="misc"><svg class="i"><use href="#i-sliders"/></svg> 工具</button>
+    <button class="tool-tab active" data-pane="wechat"><svg class="i"><use href="#i-chat"/></svg> Personal WeChat</button>
+    <button class="tool-tab" data-pane="wxwork"><svg class="i"><use href="#i-briefcase"/></svg> Work WeChat</button>
+    <button class="tool-tab" data-pane="misc"><svg class="i"><use href="#i-sliders"/></svg> Tools</button>
     <span id="toolStatus" class="tool-status" style="display:none;margin-left:auto;align-self:center;margin-right:24px"></span>
   </div>
 
   <div class="tool-pane active" data-pane="wechat">
-    <div class="tool-prereq"><svg class="i i-sm"><use href="#i-alert"/></svg> 前置：微信 PC 版正在运行且已登录</div>
+    <div class="tool-prereq"><svg class="i i-sm"><use href="#i-alert"/></svg> Prerequisite: WeChat PC is running and logged in</div>
     <div class="tool-step">
-      <div class="tool-step-label">Step 1 — 解密</div>
+      <div class="tool-step-label">Step 1 — Decrypt</div>
       <div class="tools-row">
-        <button class="tool-task-btn primary" data-task="wechat_decrypt">① 提取密钥 + 解密数据库</button>
-        <button class="tool-task-btn" data-task="image_key">② 提取图片密钥</button>
+        <button class="tool-task-btn primary" data-task="wechat_decrypt">① Extract key + decrypt database</button>
+        <button class="tool-task-btn" data-task="image_key">② Extract image key</button>
       </div>
     </div>
     <div class="tool-step">
-      <div class="tool-step-label">Step 2 — 导出/解码（可独立运行，需先 Step 1）</div>
+      <div class="tool-step-label">Step 2 — Export/Decode (can run standalone, requires Step 1 first)</div>
       <div class="tools-row">
-        <button class="tool-task-btn" data-task="export_all">③ 导出全部聊天 (JSON)</button>
-        <button class="tool-task-btn" data-task="decode_images">④ 批量解密 .dat 图片</button>
-        <button class="tool-task-btn" data-task="sns_decrypt">⑤ 朋友圈解密 + 导出</button>
+        <button class="tool-task-btn" data-task="export_all">③ Export all chats (JSON)</button>
+        <button class="tool-task-btn" data-task="decode_images">④ Batch decrypt .dat images</button>
+        <button class="tool-task-btn" data-task="sns_decrypt">⑤ Moments decrypt + export</button>
       </div>
     </div>
     <div class="tool-log-wrap" id="toolLog_wechat"></div>
   </div>
 
   <div class="tool-pane" data-pane="wxwork">
-    <div class="tool-prereq"><svg class="i i-sm"><use href="#i-alert"/></svg> 前置：企业微信 PC 版正在运行且已登录（独立于个人微信）</div>
+    <div class="tool-prereq"><svg class="i i-sm"><use href="#i-alert"/></svg> Prerequisite: Work WeChat PC is running and logged in (independent of personal WeChat)</div>
     <div class="tool-step">
-      <div class="tool-step-label">Step 1 — 解密</div>
+      <div class="tool-step-label">Step 1 — Decrypt</div>
       <div class="tools-row">
-        <button class="tool-task-btn primary" data-task="wxwork_decrypt">① 提取密钥 + 解密数据库</button>
+        <button class="tool-task-btn primary" data-task="wxwork_decrypt">① Extract key + decrypt database</button>
       </div>
     </div>
     <div class="tool-step">
-      <div class="tool-step-label">Step 2 — 导出</div>
+      <div class="tool-step-label">Step 2 — Export</div>
       <div class="tools-row">
-        <button class="tool-task-btn" data-task="wxwork_export">② 导出聊天 (CSV/HTML/JSON)</button>
+        <button class="tool-task-btn" data-task="wxwork_export">② Export chats (CSV/HTML/JSON)</button>
       </div>
     </div>
     <div class="tool-log-wrap" id="toolLog_wxwork"></div>
   </div>
 
   <div class="tool-pane" data-pane="misc">
-    <div class="tool-prereq info"><svg class="i i-sm"><use href="#i-info"/></svg> 跟微信/企微进程无关，只读已解密产物</div>
+    <div class="tool-prereq info"><svg class="i i-sm"><use href="#i-info"/></svg> Independent of WeChat/Work WeChat processes; reads already-decrypted files</div>
     <div class="tool-step">
-      <div class="tool-step-label">语音 / 转码</div>
+      <div class="tool-step-label">Voice / Transcode</div>
       <div class="tools-row">
-        <button class="tool-task-btn" data-task="voice_mp3">语音转 MP3（需 ffmpeg in PATH）</button>
+        <button class="tool-task-btn" data-task="voice_mp3">Voice to MP3 (requires ffmpeg in PATH)</button>
       </div>
     </div>
     <div class="tool-log-wrap" id="toolLog_misc"></div>
@@ -1829,41 +1829,41 @@ a.msg-link{text-decoration:none;color:inherit}
 </div>
 <div class="settings-overlay" id="settingsOverlay" onclick="toggleSettings()"></div>
 <div class="settings-panel" id="settingsPanel">
-<div class="sp-header"><h2>通知设置</h2><button class="sp-close" onclick="toggleSettings()">&times;</button></div>
+<div class="sp-header"><h2>Notification Settings</h2><button class="sp-close" onclick="toggleSettings()">&times;</button></div>
 <div class="sp-body">
 <div class="sp-section">
-<h3>全局</h3>
-<div class="sp-toggle"><label>启用通知过滤</label><label class="switch"><input type="checkbox" id="notifyEnabled" onchange="saveNotifySettings()"><span class="slider"></span></label></div>
-<div class="sp-toggle"><label>声音提醒</label><label class="switch"><input type="checkbox" id="soundEnabled" onchange="saveNotifySettings()"><span class="slider"></span></label></div>
+<h3>Global</h3>
+<div class="sp-toggle"><label>Enable notification filter</label><label class="switch"><input type="checkbox" id="notifyEnabled" onchange="saveNotifySettings()"><span class="slider"></span></label></div>
+<div class="sp-toggle"><label>Sound alerts</label><label class="switch"><input type="checkbox" id="soundEnabled" onchange="saveNotifySettings()"><span class="slider"></span></label></div>
 </div>
 <div class="sp-section">
-<h3>规则</h3>
+<h3>Rules</h3>
 <div id="rulesContainer"></div>
-<button class="add-rule-btn" onclick="addRule()">+ 添加规则</button>
+<button class="add-rule-btn" onclick="addRule()">+ Add rule</button>
 </div>
 </div>
 </div>
 <div id="lightbox" onclick="this.classList.remove('show')"><img id="lb-img" /></div>
-<!-- 导出筛选模态框 -->
+<!-- Export filter modal -->
 <div class="modal-overlay" id="exportModal">
   <div class="modal" onclick="event.stopPropagation()">
     <div class="modal-h">
-      <h2 id="exportModalTitle">导出聊天</h2>
+      <h2 id="exportModalTitle">Export Chats</h2>
       <button class="modal-close" onclick="closeExportModal()">&times;</button>
     </div>
     <div class="modal-b">
-      <input type="text" class="modal-search" id="exportSearch" placeholder="🔍 按名字 / wxid 搜索..." oninput="filterSessions()">
+      <input type="text" class="modal-search" id="exportSearch" placeholder="🔍 Search by name / wxid..." oninput="filterSessions()">
       <div class="session-list" id="exportSessionList">
-        <div class="modal-loading">加载中...</div>
+        <div class="modal-loading">Loading...</div>
       </div>
       <div class="modal-selctrl">
-        <button onclick="selectAllSessions(true)">全选</button>
-        <button onclick="selectAllSessions(false)">清空</button>
-        <button onclick="selectRecentSessions(30)">选最近 30 天活跃</button>
-        <span class="modal-selcount" id="exportSelCount" style="margin-left:auto">已选 0 个</span>
+        <button onclick="selectAllSessions(true)">Select All</button>
+        <button onclick="selectAllSessions(false)">Clear</button>
+        <button onclick="selectRecentSessions(30)">Select active in last 30 days</button>
+        <span class="modal-selcount" id="exportSelCount" style="margin-left:auto">0 selected</span>
       </div>
       <div class="modal-section" id="exportFmtSection">
-        <div class="modal-section-label">格式</div>
+        <div class="modal-section-label">Format</div>
         <div class="modal-fmt">
           <label><input type="checkbox" value="csv" checked> CSV</label>
           <label><input type="checkbox" value="html"> HTML</label>
@@ -1872,18 +1872,18 @@ a.msg-link{text-decoration:none;color:inherit}
       </div>
     </div>
     <div class="modal-f">
-      <button class="modal-btn secondary" onclick="closeExportModal()">取消</button>
-      <button class="modal-btn primary" id="exportConfirmBtn" onclick="confirmExport()" disabled>确认导出 →</button>
+      <button class="modal-btn secondary" onclick="closeExportModal()">Cancel</button>
+      <button class="modal-btn primary" id="exportConfirmBtn" onclick="confirmExport()" disabled>Confirm Export →</button>
     </div>
   </div>
 </div>
 <div class="messages" id="msgs">
-<div class="empty" id="empty"><svg class="i i-xl" style="opacity:.4;margin-bottom:12px"><use href="#i-radio"/></svg><p>等待新消息...</p><p style="margin-top:6px;font-size:11px;color:#333">WAL增量解密 · SSE推送</p></div>
+<div class="empty" id="empty"><svg class="i i-xl" style="opacity:.4;margin-bottom:12px"><use href="#i-radio"/></svg><p>Waiting for new messages...</p><p style="margin-top:6px;font-size:11px;color:#333">WAL incremental decrypt · SSE push</p></div>
 </div>
 <script>
 let n=0;
 const M=document.getElementById('msgs'), S=document.getElementById('st');
-const seen = new Set();  // 去重: timestamp+username
+const seen = new Set();  // dedup: timestamp+username
 let sseReady = false;
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
@@ -1901,21 +1901,21 @@ function fmtSize(b){
 }
 function renderRich(r){
   if(!r) return null;
-  if(r.type==='emoji' && r.emoji_url) return `<img class="msg-emoji" src="${esc(r.emoji_url)}" onerror="this.outerHTML='<span style=\\'color:#999\\'>😀 [表情]</span>'" />`;
+  if(r.type==='emoji' && r.emoji_url) return `<img class="msg-emoji" src="${esc(r.emoji_url)}" onerror="this.outerHTML='<span style=\\'color:#999\\'>😀 [emoji]</span>'" />`;
   if(r.type==='link') {
     let src = r.source ? '<div class="msg-link-src">'+esc(r.source)+'</div>' : '';
     return `<a href="${esc(r.url)}" target="_blank" rel="noopener" class="msg-link"><div class="msg-link-title">🔗 ${esc(r.title)}</div>${r.des?'<div class="msg-link-des">'+esc(r.des)+'</div>':''}${src}</a>`;
   }
   if(r.type==='file') return `<div class="msg-file"><span class="msg-file-icon">📄</span><div><div class="msg-file-name">${esc(r.title)}</div><div class="msg-file-size">${r.file_ext?r.file_ext.toUpperCase()+' · ':''}${fmtSize(r.file_size)}</div></div></div>`;
   if(r.type==='quote') return `<div class="msg-quote"><div class="msg-quote-ref">↩ <b>${esc(r.ref_name)}</b>: ${esc(r.ref_content)}</div><div>${esc(r.title)}</div></div>`;
-  if(r.type==='miniapp') return `<div class="msg-link"><div class="msg-link-title">🟢 ${esc(r.title)}</div>${r.source?'<div class="msg-link-src">小程序 · '+esc(r.source)+'</div>':''}</div>`;
-  if(r.type==='channels') return `<div class="msg-video"><span>📺</span> ${esc(r.title)} <span style="color:#666;font-size:11px">视频号</span></div>`;
+  if(r.type==='miniapp') return `<div class="msg-link"><div class="msg-link-title">🟢 ${esc(r.title)}</div>${r.source?'<div class="msg-link-src">Mini App · '+esc(r.source)+'</div>':''}</div>`;
+  if(r.type==='channels') return `<div class="msg-video"><span>📺</span> ${esc(r.title)} <span style="color:#666;font-size:11px">Channels</span></div>`;
   if(r.type==='chatlog') {
     let items = r.items||[];
     let body = '';
     if(items.length>0) {
       let preview = items.slice(0,4).map(it=>'<div class="chatlog-item"><b>'+esc(it.name)+'</b>: '+esc(it.text)+'</div>').join('');
-      let more = items.length>4 ? '<div class="chatlog-more">... 共'+items.length+'条消息</div>' : '';
+      let more = items.length>4 ? '<div class="chatlog-more">... '+items.length+' messages total</div>' : '';
       body = '<div class="chatlog-body">'+preview+more+'</div>';
     } else if(r.des) {
       body = '<div class="msg-link-des">'+esc(r.des)+'</div>';
@@ -1923,13 +1923,13 @@ function renderRich(r){
     return `<div class="msg-chatlog"><div class="msg-link-title">📋 ${esc(r.title)}</div>${body}</div>`;
   }
   if(r.type==='transfer') {
-    let dirLabel = r.direction || '微信转账';
+    let dirLabel = r.direction || 'WeChat Transfer';
     let amount = r.fee_desc ? '<div class="msg-transfer-amount">'+esc(r.fee_desc)+'</div>' : '';
-    let memo = r.pay_memo ? '<div class="msg-transfer-memo">备注: '+esc(r.pay_memo)+'</div>' : '';
+    let memo = r.pay_memo ? '<div class="msg-transfer-memo">Note: '+esc(r.pay_memo)+'</div>' : '';
     return `<div class="msg-transfer"><div class="msg-transfer-head">💸 ${esc(dirLabel)}</div>${amount}${memo}</div>`;
   }
-  if(r.type==='voice') return `<div class="msg-voice">🎤 语音 ${r.duration}s</div>`;
-  if(r.type==='video') return `<div class="msg-video">🎬 视频${r.duration?' '+r.duration+'s':''}</div>`;
+  if(r.type==='voice') return `<div class="msg-voice">🎤 Voice ${r.duration}s</div>`;
+  if(r.type==='video') return `<div class="msg-video">🎬 Video${r.duration?' '+r.duration+'s':''}</div>`;
   return null;
 }
 function showLightbox(url){
@@ -1945,7 +1945,7 @@ function renderContent(m){
   return linkify(wxEmoji(raw));
 }
 
-// ---- 通知过滤 ----
+// ---- Notification filter ----
 const DEFAULT_NOTIFY = {enabled:false, sound_enabled:true, rules:[]};
 function loadNotifySettings(){
   try{ return JSON.parse(localStorage.getItem('wechat_notify'))||DEFAULT_NOTIFY; }catch(e){ return DEFAULT_NOTIFY; }
@@ -1984,7 +1984,7 @@ function addRuleCard(r){
   const c=document.getElementById('rulesContainer');
   const d=document.createElement('div');
   d.className='rule-card';
-  d.innerHTML=`<div class="rule-header"><span style="font-size:12px;color:#888">规则 #${c.children.length+1}</span><button class="rule-del" onclick="this.closest('.rule-card').remove();saveNotifySettings()">&times;</button></div><input type="text" placeholder="群名（模糊匹配）" value="${esc(r.group_name)}" onchange="saveNotifySettings()"><input type="text" placeholder="发送人（可选，模糊匹配）" value="${esc(r.sender_name)}" onchange="saveNotifySettings()"><div class="rule-opts"><label><input type="checkbox" ${r.notify_on_any?'checked':''} onchange="saveNotifySettings()"> 匹配时通知</label></div>`;
+  d.innerHTML=`<div class="rule-header"><span style="font-size:12px;color:#888">Rule #${c.children.length+1}</span><button class="rule-del" onclick="this.closest('.rule-card').remove();saveNotifySettings()">&times;</button></div><input type="text" placeholder="Group name (fuzzy match)" value="${esc(r.group_name)}" onchange="saveNotifySettings()"><input type="text" placeholder="Sender (optional, fuzzy match)" value="${esc(r.sender_name)}" onchange="saveNotifySettings()"><div class="rule-opts"><label><input type="checkbox" ${r.notify_on_any?'checked':''} onchange="saveNotifySettings()"> Notify on match</label></div>`;
   c.appendChild(d);
 }
 function addRule(){addRuleCard();saveNotifySettings();}
@@ -2011,20 +2011,20 @@ async function cancelTool(){
   }catch(e){}
 }
 
-// —— 导出筛选模态框 ——
+// —— Export filter modal ——
 window.__exportCtx = { source: null, task: null, btn: null, sessions: [] };
 
 async function openExportModal(modalKind, task, btn){
   const source = modalKind === 'export_wxwork' ? 'wxwork' : 'wechat';
   window.__exportCtx = { source, task, btn, sessions: [] };
   document.getElementById('exportModalTitle').textContent =
-    source === 'wxwork' ? '导出企业微信聊天' : '导出个人微信聊天';
+    source === 'wxwork' ? 'Export Work WeChat Chats' : 'Export Personal WeChat Chats';
   document.getElementById('exportSearch').value = '';
-  // 企微脚本支持 --formats, 个人微信脚本目前只 JSON; 隐藏个人微信的格式选项
+  // Work WeChat script supports --formats, personal WeChat script currently only JSON; hide personal WeChat format options
   document.getElementById('exportFmtSection').style.display = source === 'wxwork' ? 'block' : 'none';
   document.getElementById('exportConfirmBtn').disabled = true;
-  document.getElementById('exportSelCount').textContent = '已选 0 个';
-  document.getElementById('exportSessionList').innerHTML = '<div class="modal-loading">加载会话列表...</div>';
+  document.getElementById('exportSelCount').textContent = '0 selected';
+  document.getElementById('exportSessionList').innerHTML = '<div class="modal-loading">Loading session list...</div>';
   document.getElementById('exportModal').classList.add('show');
   try{
     const r = await fetch('/api/sessions?source=' + source);
@@ -2034,7 +2034,7 @@ async function openExportModal(modalKind, task, btn){
     renderSessions(sessions, '');
   }catch(e){
     document.getElementById('exportSessionList').innerHTML =
-      '<div class="modal-loading" style="color:var(--danger)">加载失败: ' + esc(e.message) + '</div>';
+      '<div class="modal-loading" style="color:var(--danger)">Load failed: ' + esc(e.message) + '</div>';
   }
 }
 function closeExportModal(){
@@ -2047,12 +2047,12 @@ function renderSessions(sessions, filter){
     !lo || s.name.toLowerCase().includes(lo) || (s.username||'').toLowerCase().includes(lo)
   );
   if(!filtered.length){
-    list.innerHTML = '<div class="modal-loading">没匹配的会话</div>';
+    list.innerHTML = '<div class="modal-loading">No matching sessions</div>';
     return;
   }
   list.innerHTML = filtered.map((s, idx) => {
     const tsLabel = s.last_ts ? new Date(s.last_ts*1000).toISOString().slice(0,10) : '';
-    const typeCls = s.type === '群' ? 'grp' : (s.type === '单聊' ? 'single' : '');
+    const typeCls = s.type === 'Group' ? 'grp' : (s.type === 'Direct' ? 'single' : '');
     return `<label class="session-item">
       <input type="checkbox" data-username="${esc(s.username)}" onchange="updateSelCount()">
       <span class="session-type ${typeCls}">${esc(s.type)}</span>
@@ -2063,11 +2063,11 @@ function renderSessions(sessions, filter){
 }
 function filterSessions(){
   renderSessions(window.__exportCtx.sessions, document.getElementById('exportSearch').value);
-  updateSelCount();  // refilter 后保留 selection 但 count 重新统计当前可见的
+  updateSelCount();  // After refilter, keep selection but re-count current visible items
 }
 function updateSelCount(){
   const checked = document.querySelectorAll('#exportSessionList input[type=checkbox]:checked');
-  document.getElementById('exportSelCount').textContent = '已选 ' + checked.length + ' 个';
+  document.getElementById('exportSelCount').textContent = checked.length + ' selected';
   document.getElementById('exportConfirmBtn').disabled = checked.length === 0;
 }
 function selectAllSessions(yes){
@@ -2090,22 +2090,22 @@ function confirmExport(){
   const formats = [...document.querySelectorAll('#exportFmtSection input[type=checkbox]:checked')]
     .map(c => c.value);
   closeExportModal();
-  // 实际触发任务,带 args
+  // Actually trigger task with args
   const { task, btn } = window.__exportCtx;
   runToolWithArgs(task, btn, { users, formats });
 }
-// 需要弹模态框先筛选会话的任务
+// Tasks that need to show modal first for session selection
 const NEEDS_MODAL = { 'export_all': 'export_wechat', 'wxwork_export': 'export_wxwork' };
 
 async function runTool(task, btn){
-  // 取消已运行任务
+  // Cancel running task
   if(btn.classList.contains('cancel')){
     btn.disabled = true;
-    btn.textContent = '终止中...';
+    btn.textContent = 'Stopping...';
     cancelTool();
     return;
   }
-  // 导出类任务先弹模态框
+  // Export tasks show modal first
   if(NEEDS_MODAL[task]){
     openExportModal(NEEDS_MODAL[task], task, btn);
     return;
@@ -2120,14 +2120,14 @@ async function runToolWithArgs(task, btn, args){
   });
   btn.dataset.origText = btn.textContent;
   btn.dataset.origHtml = btn.innerHTML;
-  btn.innerHTML = '<svg class="i"><use href="#i-stop"/></svg> 终止';
+  btn.innerHTML = '<svg class="i"><use href="#i-stop"/></svg> Stop';
   btn.classList.add('cancel');
   window.__runningBtn = btn;
   const L=document.getElementById('toolLog_'+window.__activeToolPane);
   if(L) L.textContent='';
   s.style.display='inline-block';
   s.className='tool-status running';
-  s.innerHTML='<svg class="i i-sm spin"><use href="#i-loader"/></svg> 运行中: '+esc(btn.dataset.origText.trim());
+  s.innerHTML='<svg class="i i-sm spin"><use href="#i-loader"/></svg> Running: '+esc(btn.dataset.origText.trim());
   try{
     const payload = { task: task };
     if(args) payload.args = args;
@@ -2135,7 +2135,7 @@ async function runToolWithArgs(task, btn, args){
     const d=await r.json();
     if(!r.ok){
       s.className='tool-status err';
-      s.textContent='✗ '+(d.error||'启动失败');
+      s.textContent='✗ '+(d.error||'Failed to start');
       document.querySelectorAll('.tool-task-btn').forEach(b=>{
         b.disabled=false;
         if(b.dataset.origHtml){b.innerHTML = b.dataset.origHtml; b.dataset.origHtml=''; b.dataset.origText='';}
@@ -2144,7 +2144,7 @@ async function runToolWithArgs(task, btn, args){
     }
   }catch(e){
     s.className='tool-status err';
-    s.textContent='✗ 网络错误: '+e.message;
+    s.textContent='✗ Network error: '+e.message;
     document.querySelectorAll('.tool-task-btn').forEach(b=>{
       b.disabled=false;
       if(b.dataset.origHtml){b.innerHTML = b.dataset.origHtml; b.dataset.origHtml=''; b.dataset.origText='';}
@@ -2152,7 +2152,7 @@ async function runToolWithArgs(task, btn, args){
     });
   }
 }
-// 工具按钮 + tab 切换 click handler 绑定
+// Bind click handlers for tool buttons + tab switching
 document.addEventListener('DOMContentLoaded',()=>{
   document.querySelectorAll('.tool-task-btn').forEach(b=>{
     b.addEventListener('click',()=>runTool(b.dataset.task, b));
@@ -2197,7 +2197,7 @@ function sendNotification(m){
 }
 
 function addMsg(m, animate){
-  // 去重（包含类型，避免同时间戳的文字+图片组合被误判重复）
+  // Dedup (includes type, avoids same-timestamp text+image combo being wrongly treated as duplicate)
   const key = m.timestamp + '|' + (m.username||m.chat) + '|' + (m.type||'');
   if(seen.has(key)) return;
   seen.add(key);
@@ -2206,8 +2206,8 @@ function addMsg(m, animate){
   if(x) x.remove();
 
   n++;
-  document.getElementById('cnt').textContent=n+' 消息';
-  if(m.decrypt_ms!=null) document.getElementById('perf').textContent=m.pages+'页/'+m.decrypt_ms+'ms';
+  document.getElementById('cnt').textContent=n+' Messages';
+  if(m.decrypt_ms!=null) document.getElementById('perf').textContent=m.pages+'pg/'+m.decrypt_ms+'ms';
 
   const d=document.createElement('div');
   d.className = animate ? 'msg hl' : 'msg';
@@ -2219,19 +2219,19 @@ function addMsg(m, animate){
   let contentHtml = renderContent(m);
 
   const dk=m.timestamp+'|'+(m.username||m.chat);
-  d.dataset.ts = m.timestamp || 0;  // 用于按 timestamp 排序定位
+  d.dataset.ts = m.timestamp || 0;  // used for sorting by timestamp
   d.innerHTML=`<div class="msg-header"><span class="msg-time">${m.time}</span><span class="${cc}">${esc(m.chat)}</span>${sn}<div class="msg-r"><span class="msg-type">${m.type_icon} ${m.type}</span>${ur}</div></div><div class="msg-content" data-key="${dk}">${contentHtml}</div>`;
 
-  // 通知匹配检查
+  // Notification match check
   if(animate && checkNotifyMatch(m)){
     d.classList.add('notify-hl');
     sendNotification(m);
     setTimeout(()=>d.classList.remove('notify-hl'), 10000);
   }
 
-  // 按 timestamp 找正确插入位置 (降序: 大 ts 在顶, 小 ts 在底)
-  // 之前的 bug: insertBefore(d, M.firstChild) 永远插最前面,
-  // 导致 SSE 实时消息 + hidden 路径补抓的旧消息混在一起时顺序乱。
+  // Find correct insertion position by timestamp (descending: large ts at top, small ts at bottom)
+  // Previous bug: insertBefore(d, M.firstChild) always inserted at the front,
+  // causing order chaos when SSE live messages + hidden path catch-up messages were mixed together.
   const ts = +d.dataset.ts;
   const kids = M.children;
   let inserted = false;
@@ -2243,18 +2243,18 @@ function addMsg(m, animate){
       break;
     }
   }
-  if(!inserted) M.appendChild(d);  // 比所有现有都早, 放最底
+  if(!inserted) M.appendChild(d);  // Older than all existing, put at the bottom
 
   if(animate){
     setTimeout(()=>d.classList.remove('hl'), 3000);
-    document.title='('+n+') 微信监听';
+    document.title='('+n+') WeChat Monitor';
   }
 
-  // 限制最多200条
+  // Limit to max 200 entries
   while(M.children.length>200) M.removeChild(M.lastChild);
 }
 
-// 页面加载时请求通知权限
+// Request notification permission on page load
 if('Notification' in window && Notification.permission==='default'){
   Notification.requestPermission();
 }
@@ -2262,12 +2262,12 @@ if('Notification' in window && Notification.permission==='default'){
 function connectSSE(){
   const es=new EventSource('/stream');
   es.onopen=()=>{
-    S.textContent='SSE 实时';
+    S.textContent='SSE Live';
     S.className='status ok';
     sseReady=true;
   };
   es.onmessage=ev=>{
-    addMsg(JSON.parse(ev.data), true);  // 新消息有动画
+    addMsg(JSON.parse(ev.data), true);  // New messages have animation
   };
   es.addEventListener('image_update', ev=>{
     const d=JSON.parse(ev.data);
@@ -2277,7 +2277,7 @@ function connectSSE(){
       const ct=el.querySelector('.msg-content');
       if(ct && ct.dataset.key===key){
         if(d.v2_unsupported){
-          ct.innerHTML='<span style="color:#999;font-style:italic">[图片 - 新加密格式暂不支持预览]</span>';
+          ct.innerHTML='<span style="color:#999;font-style:italic">[Image - new encryption format not yet supported for preview]</span>';
         } else if(d.image_url){
           ct.innerHTML=`<img class="msg-img" src="${d.image_url}" onclick="showLightbox('${d.image_url}')" onerror="this.style.display='none'" />`;
         }
@@ -2299,7 +2299,7 @@ function connectSSE(){
   });
   es.addEventListener('tool_log', ev=>{
     const d=JSON.parse(ev.data);
-    // 写到当前激活 pane 的日志框
+    // Write to the currently active pane's log box
     const pane=window.__activeToolPane||'wechat';
     const L=document.getElementById('toolLog_'+pane);
     if(L){L.textContent += d.line; L.scrollTop = L.scrollHeight;}
@@ -2308,13 +2308,13 @@ function connectSSE(){
     const d=JSON.parse(ev.data);
     const s=document.getElementById('toolStatus');
     if(d.cancelled){
-      s.textContent = '⊘ 已终止';
+      s.textContent = '⊘ Stopped';
       s.className = 'tool-status err';
     } else {
-      s.textContent = d.ok ? '✓ 完成' : ('✗ 失败 (code ' + d.exit_code + ')');
+      s.textContent = d.ok ? '✓ Done' : ('✗ Failed (code ' + d.exit_code + ')');
       s.className = 'tool-status ' + (d.ok ? 'ok' : 'err');
     }
-    // 还原所有按钮 + 把"终止"按钮还原成原文本
+    // Restore all buttons + restore "Stop" button to original text
     document.querySelectorAll('.tool-task-btn').forEach(b=>{
       b.disabled=false;
       if(b.dataset.origHtml){b.innerHTML = b.dataset.origHtml; b.dataset.origHtml=''; b.dataset.origText='';}
@@ -2323,18 +2323,18 @@ function connectSSE(){
     window.__runningBtn = null;
   });
   es.onerror=()=>{
-    S.textContent='重连...';
+    S.textContent='Reconnecting...';
     S.className='status err';
     sseReady=false;
     es.close();
-    setTimeout(connectSSE, 2000);  // 重连不清页面
+    setTimeout(connectSSE, 2000);  // Reconnect without clearing page
   };
 }
 
-// 启动: 加载历史(无动画) → 连接SSE(有动画)
+// Startup: load history (no animation) → connect SSE (with animation)
 fetch('/api/history').then(r=>r.json()).then(ms=>{
   ms.sort((a,b)=>a.timestamp-b.timestamp);
-  ms.forEach(m=>addMsg(m, false));  // 历史消息无动画
+  ms.forEach(m=>addMsg(m, false));  // History messages with no animation
   connectSSE();
 });
 </script>
@@ -2342,26 +2342,26 @@ fetch('/api/history').then(r=>r.json()).then(ms=>{
 </html>'''
 
 
-# ────────────── 工具任务 (Web GUI 替代 tkinter app_gui.py 的入口) ────────────
+# ────────────── Tool tasks (Web GUI replacing tkinter app_gui.py entry) ────────────
 #
-# 复用现有 SSE 通道 (broadcast_sse + sse_clients), 后端跑子进程, 实时把 stdout
-# 推到浏览器。架构原则: 一次只允许 1 个工具任务运行 (避免两个解密同时挤内存)。
+# Reuses existing SSE channel (broadcast_sse + sse_clients), backend runs subprocess, pushes stdout
+# to browser in real time. Architecture principle: only 1 tool task allowed at a time (avoids two decrypts competing for memory).
 #
-# 前端在 HTML_PAGE 顶部加一个折叠区,点按钮 POST /api/tool {task: "..."}。
-# SSE 事件用 event=tool_log / tool_done 跟原 message 事件区分。
+# Frontend adds a collapsible section at the top of HTML_PAGE, clicking button POSTs /api/tool {task: "..."}.
+# SSE events use event=tool_log / tool_done to distinguish from original message events.
 
 def _build_export_steps(users, formats):
-    """根据用户选择的会话 + 格式拼 export_all_chats.py argv"""
+    """Build export_all_chats.py argv based on user-selected sessions + format"""
     cmd = [sys.executable, "export_all_chats.py"]
     if users:
         cmd += ["--users", ",".join(users)]
-    # export_all_chats 当前只输出 JSON, formats 暂时忽略
-    # (export_messages.py 有 CSV/HTML/JSON, 但走的是另一条路径, 不在 v1 范围)
+    # export_all_chats currently only outputs JSON, formats ignored for now
+    # (export_messages.py has CSV/HTML/JSON, but goes a different path, not in v1 scope)
     return [cmd]
 
 
 def _build_wxwork_export_steps(users, formats):
-    """根据用户选择拼 export_wxwork_messages.py argv (--conversation 可重复)"""
+    """Build export_wxwork_messages.py argv based on user selection (--conversation can be repeated)"""
     cmd = [sys.executable, "export_wxwork_messages.py"]
     for u in (users or []):
         cmd += ["--conversation", u]
@@ -2370,74 +2370,74 @@ def _build_wxwork_export_steps(users, formats):
     return [cmd]
 
 
-# task 配置:
-#   steps         — 固定 cmd 列表 (无参任务)
-#   build_steps   — fn(args)->[cmd, ...] 动态构造 (需要用户选会话/格式的导出任务)
-#   needs_modal   — 前端点这个 task 时要弹模态框 ('export_wechat' | 'export_wxwork')
+# task configuration:
+#   steps         — fixed cmd list (tasks with no parameters)
+#   build_steps   — fn(args)->[cmd, ...] dynamically constructed (export tasks requiring user session/format selection)
+#   needs_modal   — frontend shows modal when clicking this task ('export_wechat' | 'export_wxwork')
 TOOL_TASKS = {
-    # —— 个人微信 ——
+    # —— Personal WeChat ——
     "wechat_decrypt": {
-        "name": "① 微信解密",
+        "name": "① WeChat Decrypt",
         "steps": [[sys.executable, "main.py", "decrypt"]],
     },
     "image_key": {
-        "name": "② 图片密钥",
+        "name": "② Image Key",
         "steps": [[sys.executable, "find_image_key.py"]],
     },
     "export_all": {
-        "name": "③ 导出聊天",
+        "name": "③ Export Chats",
         "build_steps": _build_export_steps,
         "needs_modal": "export_wechat",
     },
     "decode_images": {
-        "name": "④ 批量解密图片",
+        "name": "④ Batch Decrypt Images",
         "steps": [[sys.executable, "main.py", "decode-images"]],
     },
-    # —— 朋友圈 ——
+    # —— Moments ——
     "sns_decrypt": {
-        "name": "⑤ 朋友圈解密",
+        "name": "⑤ Moments Decrypt",
         "steps": [
             [sys.executable, "decrypt_sns.py"],
             [sys.executable, "export_sns.py"],
         ],
     },
-    # —— 企业微信 ——
+    # —— Work WeChat ——
     "wxwork_decrypt": {
-        "name": "⑥ 企业微信解密",
+        "name": "⑥ Work WeChat Decrypt",
         "steps": [
             [sys.executable, "find_wxwork_keys.py"],
             [sys.executable, "decrypt_wxwork_db.py"],
         ],
     },
     "wxwork_export": {
-        "name": "⑦ 企业微信导出",
+        "name": "⑦ Work WeChat Export",
         "build_steps": _build_wxwork_export_steps,
         "needs_modal": "export_wxwork",
     },
-    # —— 工具 ——
+    # —— Tools ——
     "voice_mp3": {
-        "name": "⑧ 语音转 MP3",
+        "name": "⑧ Voice to MP3",
         "steps": [[sys.executable, "voice_to_mp3.py"]],
     },
 }
 
 _tool_lock = threading.Lock()
-_tool_running = {"job": None, "proc": None, "cancelled": False}  # 同时只允许一个任务
+_tool_running = {"job": None, "proc": None, "cancelled": False}  # Only one task allowed at a time
 
 
 def _list_sessions(source):
-    """列会话, 供导出筛选模态框消费。返回 [{name, username, type, last_ts}]
-    按 last_ts 降序。
+    """List sessions for consumption by export filter modal. Returns [{name, username, type, last_ts}]
+    sorted by last_ts descending.
 
     source:
-      wechat — 个人微信, 从 decrypted/session/session.db 读 SessionTable
-      wxwork — 企业微信, 从 wxwork_decrypted/session.db 读 conversation_table
+      wechat — personal WeChat, reads SessionTable from decrypted/session/session.db
+      wxwork — Work WeChat, reads conversation_table from wxwork_decrypted/session.db
     """
     out = []
     if source == "wechat":
         if not os.path.exists(DECRYPTED_SESSION):
             return []
-        # 复用 load_contact_names (静态快照即可, 模态框开时调一次性 OK)
+        # Reuse load_contact_names (static snapshot is fine, called once when modal opens)
         names = load_contact_names()
         try:
             with closing(sqlite3.connect(f"file:{DECRYPTED_SESSION}?mode=ro&immutable=1", uri=True)) as conn:
@@ -2449,7 +2449,7 @@ def _list_sessions(source):
                     username, type_, ts, sender, summary = r
                     is_group = username.endswith("@chatroom") if username else False
                     is_public = username.startswith("gh_") if username else False
-                    type_label = "群" if is_group else ("公众号" if is_public else "单聊")
+                    type_label = "Group" if is_group else ("Official Account" if is_public else "Direct")
                     name = names.get(username) or sender or username
                     out.append({
                         "username": username,
@@ -2474,15 +2474,15 @@ def _list_sessions(source):
                     "ORDER BY last_message_time DESC"
                 ):
                     cid, name, ts = r
-                    # id 前缀: R=群 / S=单聊 / E=外部/系统 / Y=其他
+                    # id prefix: R=Group / S=Direct / E=External/System / Y=Other
                     if cid.startswith("R:"):
-                        type_label = "群"
+                        type_label = "Group"
                     elif cid.startswith("S:"):
-                        type_label = "单聊"
+                        type_label = "Direct"
                     elif cid.startswith("E:"):
-                        type_label = "外部"
+                        type_label = "External"
                     else:
-                        type_label = "其他"
+                        type_label = "Other"
                     out.append({
                         "username": cid,
                         "name": name or cid,
@@ -2501,20 +2501,20 @@ def _broadcast_tool_event(event, **fields):
 
 
 def _run_tool_task(job_id, task_name, args=None):
-    """后台线程: 顺序跑 TOOL_TASKS[task_name].steps 的每条命令,实时推 SSE。
+    """Background thread: run each command in TOOL_TASKS[task_name].steps in order, push SSE in real time.
 
-    args 含用户在前端模态框选的参数 (users / formats 等), 由 build_steps
-    动态构造 cmd。固定任务 (无 build_steps) 直接用 steps。
+    args contains parameters selected by user in frontend modal (users / formats etc.), build_steps
+    dynamically constructs cmd. Fixed tasks (without build_steps) use steps directly.
     """
     task = TOOL_TASKS.get(task_name)
     if not task:
         _broadcast_tool_event("tool_done", job_id=job_id, ok=False,
-                              error=f"未知任务: {task_name}")
+                              error=f"Unknown task: {task_name}")
         with _tool_lock:
             _tool_running["job"] = None
         return
 
-    # 动态构造 steps (导出类) 或用固定 steps
+    # Dynamically construct steps (export type) or use fixed steps
     if "build_steps" in task:
         a = args or {}
         steps = task["build_steps"](a.get("users", []), a.get("formats", []))
@@ -2522,7 +2522,7 @@ def _run_tool_task(job_id, task_name, args=None):
         steps = task["steps"]
 
     _broadcast_tool_event("tool_log", job_id=job_id,
-                          line=f"━━━ 开始: {task['name']} ━━━\n")
+                          line=f"━━━ Start: {task['name']} ━━━\n")
 
     exit_code = 0
     cancelled = False
@@ -2548,11 +2548,11 @@ def _run_tool_task(job_id, task_name, args=None):
             )
         except Exception as e:
             _broadcast_tool_event("tool_log", job_id=job_id,
-                                  line=f"[ERROR] 启动失败: {e}\n")
+                                  line=f"[ERROR] Failed to start: {e}\n")
             exit_code = -1
             break
 
-        # 暴露 proc 给取消路由
+        # Expose proc to cancel route
         with _tool_lock:
             _tool_running["proc"] = proc
 
@@ -2567,11 +2567,11 @@ def _run_tool_task(job_id, task_name, args=None):
             if _tool_running.get("cancelled"):
                 cancelled = True
                 _broadcast_tool_event("tool_log", job_id=job_id,
-                                      line=f"\n[CANCELLED] 任务被用户终止\n")
+                                      line=f"\n[CANCELLED] Task stopped by user\n")
                 break
         if proc.returncode != 0:
             _broadcast_tool_event("tool_log", job_id=job_id,
-                                  line=f"\n[FAIL] 返回码 {proc.returncode}\n")
+                                  line=f"\n[FAIL] Return code {proc.returncode}\n")
             exit_code = proc.returncode
             break
 
@@ -2593,7 +2593,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             super().handle()
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
-            pass  # 浏览器关闭连接，正常
+            pass  # Browser closed connection, normal
 
     def do_GET(self):
         if self.path in ('/', '/index.html'):
@@ -2634,7 +2634,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif self.path.startswith('/img/'):
             filename = urllib.parse.unquote(self.path[5:])
-            # 安全: 防目录穿越
+            # Security: prevent directory traversal
             if '/' in filename or '\\' in filename or '..' in filename:
                 self.send_error(403)
                 return
@@ -2698,7 +2698,7 @@ class Handler(BaseHTTPRequestHandler):
                     if q in sse_clients:
                         sse_clients.remove(q)
         elif self.path == "/api/sessions" or self.path.startswith("/api/sessions?"):
-            # 列会话(用于导出筛选模态框)
+            # List sessions (for export filter modal)
             parsed = urllib.parse.urlparse(self.path)
             params = urllib.parse.parse_qs(parsed.query)
             source = params.get("source", ["wechat"])[0]
@@ -2736,7 +2736,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": f"未知任务: {task_name}",
+                self.wfile.write(json.dumps({"error": f"Unknown task: {task_name}",
                                              "available": list(TOOL_TASKS)}).encode())
                 return
 
@@ -2746,7 +2746,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(json.dumps({
-                        "error": "已有任务在跑",
+                        "error": "A task is already running",
                         "running_job": _tool_running["job"],
                     }).encode())
                     return
@@ -2773,18 +2773,18 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_response(404)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
-                    self.wfile.write(json.dumps({"error": "无运行中任务"}).encode())
+                    self.wfile.write(json.dumps({"error": "No running task"}).encode())
                     return
                 _tool_running["cancelled"] = True
             try:
                 proc.terminate()
-                # 给 1.5 秒优雅退, 否则强杀
+                # Allow 1.5 seconds for graceful exit, otherwise force kill
                 try:
                     proc.wait(timeout=1.5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
             except Exception as e:
-                pass  # 进程可能正好自己退了
+                pass  # Process may have already exited on its own
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -2799,52 +2799,52 @@ class ThreadedServer(ThreadingMixIn, HTTPServer):
 
 
 def _start_monitor_if_ready():
-    """如果 keys 已存在且能解出 session.db, 启动监听线程; 否则跳过。
+    """Start monitor thread if keys exist and session.db can be decrypted; otherwise skip.
 
-    用户在 Web UI 工具箱点 "① 提取密钥 + 解密数据库" 后, keys 文件就会
-    存在。届时刷新页面即可激活监听 (重启 monitor_web 或者下次访问 UI
-    时再尝试启动)。
+    After user clicks "① Extract key + decrypt database" in Web UI toolbox, the keys file will
+    exist. Refresh the page to activate monitoring (restart monitor_web or try starting next time
+    UI is accessed).
 
-    返回 True = 监听已启动, False = 未启动 (UI 仍可用作工具箱)。
+    Returns True = monitor started, False = not started (UI still usable as toolbox).
     """
     if not os.path.exists(KEYS_FILE):
-        print(f"[!] 未找到 keys 文件: {KEYS_FILE}", flush=True)
-        print("    Web UI 仍可用作工具箱 (从右上角 🛠️ 工具 启动 '① 提取密钥')",
+        print(f"[!] Keys file not found: {KEYS_FILE}", flush=True)
+        print("    Web UI is still usable as toolbox (use top-right 🛠️ Tools to run '① Extract key')",
               flush=True)
-        print("    解密完成后重启本进程, 监听会自动启动\n", flush=True)
+        print("    After decryption completes, restart this process and monitoring will start automatically\n", flush=True)
         return False
 
     try:
         with open(KEYS_FILE, encoding="utf-8") as f:
             keys = strip_key_metadata(json.load(f))
     except Exception as e:
-        print(f"[!] 读取 keys 文件失败: {e}", flush=True)
-        print("    Web UI 仍可用作工具箱\n", flush=True)
+        print(f"[!] Failed to read keys file: {e}", flush=True)
+        print("    Web UI is still usable as toolbox\n", flush=True)
         return False
 
     session_key_info = get_key_info(keys, os.path.join("session", "session.db"))
     if not session_key_info:
-        print("[!] keys 文件里没有 session.db 密钥", flush=True)
-        print("    可能 keys 是部分提取的, 工具箱 → '① 提取密钥' 重跑一次\n",
+        print("[!] No session.db key in keys file", flush=True)
+        print("    Keys may be partially extracted, toolbox → '① Extract key' to re-run\n",
               flush=True)
         return False
 
     enc_key = bytes.fromhex(session_key_info["enc_key"])
     session_db = os.path.join(DB_DIR, "session", "session.db")
     if not os.path.exists(session_db):
-        print(f"[!] session.db 不存在: {session_db}", flush=True)
-        print("    检查 config.json 的 db_dir 是否对应当前微信账号\n", flush=True)
+        print(f"[!] session.db not found: {session_db}", flush=True)
+        print("    Check if db_dir in config.json matches the current WeChat account\n", flush=True)
         return False
 
-    print("加载联系人...", flush=True)
+    print("Loading contacts...", flush=True)
     contact_names = load_contact_names()
-    print(f"已加载 {len(contact_names)} 个联系人", flush=True)
+    print(f"Loaded {len(contact_names)} contacts", flush=True)
 
-    print("构建 username→DB 映射...", flush=True)
+    print("Building username→DB mapping...", flush=True)
     username_db_map = build_username_db_map()
-    print(f"已映射 {len(username_db_map)} 个用户名", flush=True)
+    print(f"Mapped {len(username_db_map)} usernames", flush=True)
 
-    # 启动时清理可能损坏的缓存
+    # Clean up possibly corrupted cache on startup
     if os.path.isdir(MONITOR_CACHE_DIR):
         for f in os.listdir(MONITOR_CACHE_DIR):
             fp = os.path.join(MONITOR_CACHE_DIR, f)
@@ -2856,13 +2856,13 @@ def _start_monitor_if_ready():
                 except Exception:
                     try:
                         os.unlink(fp)
-                        print(f"[cleanup] 删除损坏缓存: {f}", flush=True)
+                        print(f"[cleanup] deleted corrupted cache: {f}", flush=True)
                     except PermissionError:
-                        print(f"[cleanup] 缓存被占用跳过: {f}", flush=True)
+                        print(f"[cleanup] cache locked, skipped: {f}", flush=True)
 
     db_cache = MonitorDBCache(keys, MONITOR_CACHE_DIR)
 
-    # 后台预热所有 message DB
+    # Background warm-up of all message DBs
     def _warmup():
         try:
             t0 = time.perf_counter()
@@ -2877,11 +2877,11 @@ def _start_monitor_if_ready():
                     db_cache.get(k)
                     print(f"[warmup] {k} {(time.perf_counter()-t1)*1000:.0f}ms", flush=True)
                 except Exception as e:
-                    print(f"[warmup] {k} 失败: {e}", flush=True)
+                    print(f"[warmup] {k} failed: {e}", flush=True)
         except Exception as e:
-            print(f"[warmup] 异常: {e}", flush=True)
+            print(f"[warmup] error: {e}", flush=True)
         _build_emoji_lookup(keys)
-        print(f"[warmup] 全部完成 {(time.perf_counter()-t0)*1000:.0f}ms", flush=True)
+        print(f"[warmup] all done {(time.perf_counter()-t0)*1000:.0f}ms", flush=True)
     threading.Thread(target=_warmup, daemon=True).start()
 
     t = threading.Thread(target=monitor_thread,
@@ -2893,14 +2893,14 @@ def _start_monitor_if_ready():
 
 def main():
     print("=" * 60, flush=True)
-    print("  WeChat Decrypt — Web UI + 实时监听", flush=True)
+    print("  WeChat Decrypt — Web UI + Live Monitor", flush=True)
     print("=" * 60, flush=True)
 
     _start_monitor_if_ready()
 
     server = ThreadedServer(('0.0.0.0', PORT), Handler)
     print(f"=> http://localhost:{PORT}", flush=True)
-    print("Ctrl+C 停止\n", flush=True)
+    print("Ctrl+C to stop\n", flush=True)
 
     try:
         import webbrowser
@@ -2911,7 +2911,7 @@ def main():
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n已停止")
+        print("\nStopped")
 
 
 if __name__ == '__main__':

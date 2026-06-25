@@ -1,9 +1,9 @@
-"""导出微信朋友圈动态（SnsTimeLine 表）
+"""Export WeChat Moments posts (SnsTimeLine table)
 
-输出目录: <output_base_dir>/<display_name>/SNS/<yyyyMMddHHmmss000>.json
-媒体文件: <output_base_dir>/<display_name>/SNS/<yyyyMMddHHmmss000>_<n>.<ext>
-汇总文件: <output_base_dir>/<display_name>/SNS/timeline.json
-时间线:   <output_base_dir>/<display_name>/SNS/timeline.html
+Output dir:   <output_base_dir>/<display_name>/SNS/<yyyyMMddHHmmss000>.json
+Media files:  <output_base_dir>/<display_name>/SNS/<yyyyMMddHHmmss000>_<n>.<ext>
+Summary file: <output_base_dir>/<display_name>/SNS/timeline.json
+Timeline:     <output_base_dir>/<display_name>/SNS/timeline.html
 """
 import base64
 import binascii
@@ -28,27 +28,30 @@ if sys.platform == "win32":
 from config import load_config
 from decode_image import aligned_aes_block_size
 
-# 朋友圈 XML 来源是不可信输入 (他人朋友圈的 content), 必须挡 XXE。
-# 跟 mcp_server._XML_UNSAFE_RE 保持同一过滤模式; max_len 比 mcp_server 宽松
-# (朋友圈 timeline XML 含媒体列表 + 评论, 实测可达几十KB; 给 200K 余量)。
+# Moments XML comes from untrusted input (other users' post content) — XXE must be blocked.
+# Uses the same filter pattern as mcp_server._XML_UNSAFE_RE; max_len is more lenient than
+# mcp_server (Moments timeline XML includes media lists + comments, can reach tens of KB in
+# practice; 200K headroom given).
 _SNS_XML_UNSAFE_RE = re.compile(r'<!DOCTYPE|<!ENTITY', re.IGNORECASE)
 _SNS_XML_MAX_LEN = 200_000
 
-# SnsTimeLine.content 实际有 4 种编码形态（不同 WeChat 版本/历史时段）：
-#   1. bytes（zstd 压缩，magic 28 B5 2F FD）或裸 UTF-8 bytes
-#   2. 已是 plain XML 字符串
-#   3. hex 字符串（整段 0-9a-f，偶数长度）
-#   4. base64 字符串（A-Za-z0-9+/=）
-# 直接喂 ET.fromstring 时，后三种以 ParseError 静默返回 None，整条 row 丢失。
+# SnsTimeLine.content can appear in 4 encoding forms (different WeChat versions/eras):
+#   1. bytes (zstd compressed, magic 28 B5 2F FD) or raw UTF-8 bytes
+#   2. already a plain XML string
+#   3. hex string (all 0-9a-f, even length)
+#   4. base64 string (A-Za-z0-9+/=)
+# When fed directly to ET.fromstring, the last three fail silently with ParseError,
+# causing the entire row to be lost.
 _SNS_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _SNS_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 _SNS_BASE64_RE = re.compile(r"^[A-Za-z0-9+/=]+$")
 
-# 2013-2017 老朋友圈 XML 含 ElementTree 无法接受的字符：
-#   - 裸 &（URL 里的 query string，应该是 &amp;）
-#   - 文本字段里裸 < >（用户在 contentDesc 等里手打的尖括号）
-#   - 控制字符（\x00-\x08 等 XML 1.0 禁字符）
-# CDATA 块内的 & < > 是合法的，不能动 —— 必须先把 CDATA 圈出来再清洗外面。
+# 2013-2017 legacy Moments XML contains characters ElementTree cannot accept:
+#   - bare & (in URL query strings, should be &amp;)
+#   - bare < > in text fields (user-typed angle brackets in contentDesc etc.)
+#   - control characters (\x00-\x08 etc., forbidden in XML 1.0)
+# & < > inside CDATA blocks are valid and must not be touched — CDATA blocks must be
+# identified first before sanitizing the surrounding text.
 _SNS_INVALID_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _SNS_CDATA_BLOCK_RE = re.compile(r"<!\[CDATA\[.*?\]\]>", re.DOTALL)
 _SNS_BARE_AMP_RE = re.compile(
@@ -66,11 +69,13 @@ _SNS_TEXT_NODE_RE = re.compile(
 
 
 def _decode_sns_content_blob(value):
-    """把 SnsTimeLine.content 列(任意编码形态)转成 UTF-8 XML 字符串。
+    """Convert a SnsTimeLine.content column value (any encoding form) to a UTF-8 XML string.
 
-    bytes 优先尝试 zstd 解压；字符串按 plain XML / hex / base64 顺序检测。
-    无法识别时返回原值的 string 形态，让上层 ET.fromstring 自然 ParseError。
-    None / 空值 → 空字符串。
+    For bytes, zstd decompression is tried first; strings are detected in order:
+    plain XML / hex / base64.
+    If unrecognized, returns the string form of the original value so the caller's
+    ET.fromstring raises a natural ParseError.
+    None / empty value -> empty string.
     """
     if value is None:
         return ""
@@ -105,11 +110,11 @@ def _decode_sns_content_blob(value):
 
 
 def _sanitize_sns_pseudo_xml(xml_text):
-    """修 WeChat 老朋友圈 XML 的非法字符，让 ElementTree 能解析。
+    """Fix illegal characters in WeChat legacy Moments XML so ElementTree can parse it.
 
-    CDATA 块内不动；块外把裸 & 转成 &amp;。
-    text-only 节点（content/title/description/...）内部的裸 < > 转义掉。
-    控制字符直接剥除。
+    CDATA blocks are left untouched; bare & outside them is converted to &amp;.
+    Bare < > inside text-only nodes (content/title/description/...) are escaped.
+    Control characters are stripped outright.
     """
     s = _SNS_INVALID_CTRL_RE.sub("", xml_text)
     parts = []
@@ -140,24 +145,24 @@ SNS_DB_PATH = os.path.join(DECRYPTED_DIR, "sns", "sns.db")
 CONTACT_DB_PATH = os.path.join(DECRYPTED_DIR, "contact", "contact.db")
 OUTPUT_DIR = _cfg["output_base_dir"]
 
-# 图片缓存 / 解密相关配置
+# Image cache / decryption configuration
 IMAGE_AES_KEY = _cfg.get("image_aes_key")
 IMAGE_XOR_KEY = _cfg.get("image_xor_key", 0x88)
 XWECHAT_CACHE_DIR = _cfg.get("xwechat_cache_dir", "")
 SNS_CACHE_DIR = _cfg.get("sns_cache_dir", "")
 
-# 联系人筛选（与 export_messages.py 一致）
+# Contact filter (consistent with export_messages.py)
 _CONTACT_FILTER = None
 _filter_raw = os.environ.get("WECHAT_EXPORT_CONTACTS", "").strip()
 if _filter_raw:
     _CONTACT_FILTER = set(_filter_raw.split(","))
-    print(f"朋友圈联系人筛选: {len(_CONTACT_FILTER)} 个")
+    print(f"Moments contact filter: {len(_CONTACT_FILTER)} contacts")
 
-# ── 媒体下载 ─────────────────────────────────────────────────────────────────
+# ── Media download ───────────────────────────────────────────────────────────
 
-_DOWNLOAD_TIMEOUT = 10  # 秒
+_DOWNLOAD_TIMEOUT = 10  # seconds
 
-# ── 本地缓存图片解密 & 匹配 ──────────────────────────────────────────────────
+# ── Local cache image decryption & matching ──────────────────────────────────
 
 _V2_MAGIC = b'\x07\x08V2\x08\x07'
 _V1_MAGIC = b'\x07\x08V1\x08\x07'
@@ -167,11 +172,11 @@ _IMAGE_MAGICS = {
     'gif': [0x47, 0x49, 0x46, 0x38],
     'webp': [0x52, 0x49, 0x46, 0x46],
 }
-_TIME_WINDOW = 72 * 3600  # 72 小时
+_TIME_WINDOW = 72 * 3600  # 72 hours
 
 
 def _decrypt_sns_dat(dat_path):
-    """解密 SNS 缓存 .dat 文件，返回 bytes 或 None"""
+    """Decrypt an SNS cache .dat file; returns bytes or None."""
     try:
         with open(dat_path, 'rb') as f:
             data = f.read()
@@ -182,7 +187,7 @@ def _decrypt_sns_dat(dat_path):
 
     head6 = data[:6]
 
-    # V2 / V1 格式（xwechat cache）
+    # V2 / V1 format (xwechat cache)
     if head6 in (_V2_MAGIC, _V1_MAGIC):
         aes_key = None
         if head6 == _V1_MAGIC:
@@ -211,7 +216,7 @@ def _decrypt_sns_dat(dat_path):
         except Exception:
             return None
 
-    # 旧 XOR 格式（FileStorage Sns Cache）
+    # Legacy XOR format (FileStorage Sns Cache)
     for magic in _IMAGE_MAGICS.values():
         key = data[0] ^ magic[0]
         if all(i < len(data) and (data[i] ^ key) == magic[i] for i in range(len(magic))):
@@ -221,7 +226,7 @@ def _decrypt_sns_dat(dat_path):
 
 
 def _detect_format(header):
-    """检测解密后数据的图片格式，返回扩展名"""
+    """Detect the image format of decrypted data; returns the file extension."""
     if header[:3] == b'\xff\xd8\xff':
         return 'jpg'
     if header[:4] == b'\x89PNG':
@@ -234,17 +239,17 @@ def _detect_format(header):
 
 
 def _image_size_from_bytes(data):
-    """从解密后的图片数据提取 (width, height)，失败返回 (0, 0)"""
+    """Extract (width, height) from decrypted image data; returns (0, 0) on failure."""
     if not data or len(data) < 24:
         return 0, 0
 
-    # PNG: IHDR 位于字节 16-24
+    # PNG: IHDR is at bytes 16-24
     if data[:4] == b'\x89PNG':
         w = struct.unpack('>I', data[16:20])[0]
         h = struct.unpack('>I', data[20:24])[0]
         return w, h
 
-    # JPEG: 查找 SOF 标记
+    # JPEG: find SOF marker
     if data[:2] == b'\xff\xd8':
         i = 2
         while i < len(data) - 9:
@@ -261,7 +266,7 @@ def _image_size_from_bytes(data):
             i += 2 + seg_len
         return 0, 0
 
-    # WEBP VP8
+    # WEBP VP8 format
     if data[:4] == b'RIFF' and len(data) >= 30 and data[8:12] == b'WEBP':
         if data[12:16] == b'VP8 ':
             w = struct.unpack('<H', data[26:28])[0] & 0x3FFF
@@ -272,12 +277,12 @@ def _image_size_from_bytes(data):
 
 
 def _build_sns_cache_index():
-    """扫描 SNS 缓存目录，预解密文件头提取元数据
+    """Scan the SNS cache directory, pre-decrypt file headers to extract metadata.
 
-    返回按 mtime 排序的索引:
+    Returns an index sorted by mtime:
     [(mtime, path, est_dec_size, fmt, width, height), ...]
     """
-    raw_paths = []  # 先收集所有路径
+    raw_paths = []  # collect all paths first
 
     # 1. xwechat cache: <cache_dir>/YYYY-MM/Sns/Img/<2hex>/<30hex>
     if XWECHAT_CACHE_DIR and os.path.isdir(XWECHAT_CACHE_DIR):
@@ -301,7 +306,7 @@ def _build_sns_cache_index():
             if not os.path.isdir(month_path):
                 continue
             for fname in os.listdir(month_path):
-                if fname.endswith('_t'):  # 跳过缩略图
+                if fname.endswith('_t'):  # skip thumbnails
                     continue
                 fp = os.path.join(month_path, fname)
                 if os.path.isfile(fp):
@@ -310,9 +315,9 @@ def _build_sns_cache_index():
     if not raw_paths:
         return []
 
-    print(f"  预读取 {len(raw_paths)} 个缓存文件元数据...")
+    print(f"  Pre-reading metadata for {len(raw_paths)} cache files...")
 
-    # 准备 AES key（避免在循环内重复构造）
+    # Prepare AES key (avoid reconstructing it on every loop iteration)
     aes_key = None
     if IMAGE_AES_KEY:
         aes_key = IMAGE_AES_KEY.encode('ascii')[:16] if isinstance(IMAGE_AES_KEY, str) else IMAGE_AES_KEY[:16]
@@ -333,7 +338,7 @@ def _build_sns_cache_index():
             est_dec_size = fsize
 
             if head6 in (_V2_MAGIC, _V1_MAGIC):
-                # V2/V1: 解密 AES 部分获取文件头
+                # V2/V1: decrypt the AES portion to obtain the file header
                 k = b'cfcd208495d565ef' if head6 == _V1_MAGIC else aes_key
                 if not k or len(k) < 16:
                     continue
@@ -343,7 +348,7 @@ def _build_sns_cache_index():
                     aligned = aligned_aes_block_size(aes_size)
                     est_dec_size = fsize - 15 - (aligned - aes_size)
                     available = min(aligned, len(data) - 15)
-                    # 按 16 字节块对齐（ECB 可逐块解密）
+                    # align to 16-byte blocks (ECB can decrypt block by block)
                     usable = (available // 16) * 16
                     if usable < 16:
                         continue
@@ -352,7 +357,7 @@ def _build_sns_cache_index():
                 except Exception:
                     continue
             else:
-                # XOR 格式
+                # XOR format
                 for magic in _IMAGE_MAGICS.values():
                     key = data[0] ^ magic[0]
                     if all(i < len(data) and (data[i] ^ key) == magic[i] for i in range(len(magic))):
@@ -377,9 +382,9 @@ def _build_sns_cache_index():
 
 
 def _match_cache_images(create_time, media_list, index, index_mtimes):
-    """为一条动态的所有媒体项匹配本地缓存图片（无需解密，仅查元数据索引）
+    """Match local cache images for all media items in a post (metadata index only, no decryption).
 
-    返回: [(matched_path, fmt), ...] 与 media_list 等长，未匹配为 (None, None)
+    Returns: [(matched_path, fmt), ...] same length as media_list; unmatched entries are (None, None).
     """
     results = []
     if not index or not media_list:
@@ -390,7 +395,7 @@ def _match_cache_images(create_time, media_list, index, index_mtimes):
     lo = bisect.bisect_left(index_mtimes, t_low)
     hi = bisect.bisect_right(index_mtimes, t_high)
 
-    # 如果时间窗口为空（xwechat cache mtime 异常），扩大到全部
+    # If the time window is empty (abnormal xwechat cache mtime), expand to all entries
     if lo >= hi:
         lo, hi = 0, len(index)
 
@@ -413,12 +418,12 @@ def _match_cache_images(create_time, media_list, index, index_mtimes):
             if path_i in used_paths:
                 continue
 
-            # 尺寸匹配
+            # dimensions match
             if want_w > 0 and want_h > 0 and w_i > 0 and h_i > 0:
                 if w_i != want_w or h_i != want_h:
                     continue
 
-            # 大小匹配
+            # file size match
             if want_size > 0:
                 if dec_size_i > want_size * 3 or dec_size_i < want_size * 0.3:
                     continue
@@ -437,29 +442,30 @@ def _match_cache_images(create_time, media_list, index, index_mtimes):
 
     return results
 
-# ContentObject type 含义（已知）
+# ContentObject type meanings (known values)
 _CONTENT_TYPES = {
-    1: "图文",
-    2: "纯文本",
-    3: "链接",
-    5: "视频链接",
-    7: "位置",
-    15: "视频",
-    28: "短视频",
-    30: "音乐",
-    34: "笔记",
-    42: "小程序",
-    54: "直播",
+    1: "Image+Text",
+    2: "Text only",
+    3: "Link",
+    5: "Video link",
+    7: "Location",
+    15: "Video",
+    28: "Short video",
+    30: "Music",
+    34: "Note",
+    42: "Mini program",
+    54: "Live stream",
 }
 
 
 def _try_download_media(url, save_path):
-    """尝试下载媒体文件，返回 True/False
+    """Attempt to download a media file; returns True/False.
 
-    微信朋友圈 shmmsns.qpic.cn 图片需要携带 Referer 和 User-Agent。
-    注意: URL 返回的数据可能是加密的（enc_idx=1 的情况），
-    解密算法尚未公开，此时下载的文件无法直接查看。
-    如果下载失败返回 False，后续可替换为更复杂的下载逻辑。
+    WeChat Moments images from shmmsns.qpic.cn require a Referer and User-Agent header.
+    Note: the data returned by the URL may be encrypted (enc_idx=1 case);
+    the decryption algorithm is not publicly known, so downloaded files may not be
+    directly viewable. Returns False on failure; replace with more complex download
+    logic if needed.
     """
     if not url or not url.startswith("http"):
         return False
@@ -476,7 +482,7 @@ def _try_download_media(url, save_path):
             data = resp.read()
             if len(data) < 100:
                 return False
-            # 检测格式
+            # detect format
             if data[:3] == b'\xff\xd8\xff':
                 ext = '.jpg'
             elif data[:4] == b'\x89PNG':
@@ -497,7 +503,7 @@ def _try_download_media(url, save_path):
 
 
 def _parse_media_list(timeline_obj):
-    """解析 TimelineObject 中的 mediaList，返回 media 信息列表"""
+    """Parse the mediaList inside a TimelineObject; returns a list of media info dicts."""
     medias = []
     for media_el in timeline_obj.findall('.//media'):
         media_type = media_el.findtext('type', '')
@@ -535,10 +541,11 @@ def _parse_media_list(timeline_obj):
 
 
 def _parse_timeline_xml(content_xml):
-    """解析 SnsTimeLine 的 Content XML，返回结构化数据。
+    """Parse the Content XML of a SnsTimeLine row; returns structured data.
 
-    content_xml 入参可能是 bytes / zstd 字节 / hex 串 / base64 串 / plain XML，
-    先 decode 再 sanitize 老 XML 脏数据（裸 & < > 控制字符），最后才喂 ET。
+    content_xml may be bytes / zstd bytes / hex string / base64 string / plain XML.
+    It is decoded first, then legacy XML dirt (bare & < > and control characters) is
+    sanitized before being passed to ET.
     """
     if not content_xml:
         return None
@@ -548,8 +555,8 @@ def _parse_timeline_xml(content_xml):
     if len(decoded) > _SNS_XML_MAX_LEN:
         return None
     if _SNS_XML_UNSAFE_RE.search(decoded):
-        # XXE 防护: 拒绝 DOCTYPE/ENTITY,避免恶意朋友圈 XML 通过 entity expansion
-        # 或外部实体引用执行 SSRF/读取本地文件
+        # XXE protection: reject DOCTYPE/ENTITY to prevent malicious Moments XML from
+        # performing SSRF or reading local files via entity expansion or external entity refs.
         return None
     try:
         root = ET.fromstring(_sanitize_sns_pseudo_xml(decoded))
@@ -572,7 +579,7 @@ def _parse_timeline_xml(content_xml):
     except ValueError:
         content_type_int = 0
 
-    # 解析位置
+    # parse location
     loc_el = tl.find('.//location')
     location = None
     if loc_el is not None:
@@ -592,7 +599,7 @@ def _parse_timeline_xml(content_xml):
         "create_time_str": datetime.fromtimestamp(create_time).strftime("%Y-%m-%d %H:%M:%S") if create_time else "",
         "content_desc": tl.findtext('contentDesc', ''),
         "content_type": content_type_int,
-        "content_type_name": _CONTENT_TYPES.get(content_type_int, f"未知({content_type_int})"),
+        "content_type_name": _CONTENT_TYPES.get(content_type_int, f"Unknown({content_type_int})"),
         "nickname": root.findtext('.//LocalExtraInfo/nickname', ''),
         "is_private": tl.findtext('private', '0') == '1',
         "location": location,
@@ -601,11 +608,12 @@ def _parse_timeline_xml(content_xml):
 
 
 def _load_comments(conn):
-    """加载 SnsMessage_tmp3 评论/点赞，按 feed_id 分组。
+    """Load comments/likes from SnsMessage_tmp3, grouped by feed_id.
 
-    `del_status != 0` 表示对方撤回该互动 —— 微信本地不真删，只设删除标记，
-    不过滤会把已撤回的点赞 / 评论也导出。COALESCE 兜底老 schema 缺列时
-    `NULL` 视作 0。
+    `del_status != 0` means the other party retracted the interaction — WeChat does not
+    actually delete it locally, only sets a deletion flag. Not filtering these would
+    export already-retracted likes/comments. COALESCE treats NULL as 0 for older schemas
+    that lack the column.
     """
     comments = {}
     try:
@@ -621,8 +629,8 @@ def _load_comments(conn):
             comments[feed_id].append({
                 "create_time": ctime,
                 "create_time_str": datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S") if ctime else "",
-                "type": ctype,  # 1=点赞, 2=评论
-                "type_name": "点赞" if ctype == 1 else "评论" if ctype == 2 else f"未知({ctype})",
+                "type": ctype,  # 1=like, 2=comment
+                "type_name": "Like" if ctype == 1 else "Comment" if ctype == 2 else f"Unknown({ctype})",
                 "from_username": from_u or "",
                 "from_nickname": from_n or "",
                 "to_username": to_u or "",
@@ -630,19 +638,19 @@ def _load_comments(conn):
                 "content": content or "",
             })
     except Exception as e:
-        print(f"读取评论数据失败: {e}")
+        print(f"Failed to read comment data: {e}")
     return comments
 
 
 def _safe_dirname(name: str) -> str:
-    """清理文件夹名中的非法字符"""
+    """Strip illegal characters from a directory name."""
     for ch in r'\/:*?"<>|':
         name = name.replace(ch, "_")
     return name.strip() or "unknown"
 
 
 def _load_contact_map():
-    """从 contact.db 加载 {username: display_name}"""
+    """Load {username: display_name} from contact.db."""
     cmap = {}
     if not os.path.exists(CONTACT_DB_PATH):
         return cmap
@@ -655,12 +663,12 @@ def _load_contact_map():
             cmap[uname] = _safe_dirname(dname)
         conn.close()
     except Exception as e:
-        print(f"读取联系人数据库失败: {e}")
+        print(f"Failed to read contact database: {e}")
     return cmap
 
 
 def _timestamp_filename(unix_ts):
-    """Unix 时间戳 → yyyyMMddHHmmss000 文件名（毫秒部分为 000）"""
+    """Unix timestamp -> yyyyMMddHHmmss000 filename (millisecond part is 000)."""
     if not unix_ts:
         return "00000000000000000"
     dt = datetime.fromtimestamp(unix_ts)
@@ -668,26 +676,26 @@ def _timestamp_filename(unix_ts):
 
 
 def _html_escape(text):
-    """简单 HTML 转义"""
+    """Simple HTML escaping."""
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def _generate_timeline_html(display_name, posts, sns_dir, image_files):
-    """生成朋友圈时间线 HTML
+    """Generate a Moments timeline HTML file.
 
     Args:
-        display_name: 联系人显示名
-        posts: 按时间倒序排列的动态列表
-        sns_dir: SNS 输出目录
-        image_files: {final_name: [(rel_path, ext), ...]} 每条动态的图片文件列表
+        display_name: contact display name
+        posts: list of posts in reverse-chronological order
+        sns_dir: SNS output directory
+        image_files: {final_name: [(rel_path, ext), ...]} image file list per post
     """
     html_path = os.path.join(sns_dir, "timeline.html")
     parts = [f"""<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{_html_escape(display_name)} - 朋友圈</title>
+<title>{_html_escape(display_name)} - Moments</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f5f5f5; color: #333; }}
 h1 {{ text-align: center; color: #07c160; border-bottom: 2px solid #07c160; padding-bottom: 10px; }}
@@ -708,8 +716,8 @@ h1 {{ text-align: center; color: #07c160; border-bottom: 2px solid #07c160; padd
 </style>
 </head>
 <body>
-<h1>{_html_escape(display_name)} 的朋友圈</h1>
-<div class="stats">共 {len(posts)} 条动态</div>
+<h1>{_html_escape(display_name)}'s Moments</h1>
+<div class="stats">{len(posts)} posts total</div>
 """]
 
     for post in posts:
@@ -722,13 +730,13 @@ h1 {{ text-align: center; color: #07c160; border-bottom: 2px solid #07c160; padd
         parts.append('<div class="post">')
         parts.append(f'<div class="post-time">{time_str}<span class="post-type">{type_name}</span>')
         if is_private:
-            parts.append('<span class="private-tag">仅自己可见</span>')
+            parts.append('<span class="private-tag">Visible to self only</span>')
         parts.append('</div>')
 
         if text:
             parts.append(f'<div class="post-text">{text}</div>')
 
-        # 图片
+        # images
         imgs = image_files.get(final_name, [])
         if imgs:
             parts.append('<div class="post-images">')
@@ -736,12 +744,12 @@ h1 {{ text-align: center; color: #07c160; border-bottom: 2px solid #07c160; padd
                 parts.append(f'<img src="{_html_escape(rel_path)}" loading="lazy" onclick="window.open(this.src)">')
             parts.append('</div>')
 
-        # 位置
+        # location
         loc = post.get("location")
         if loc and loc.get("poi_name"):
             parts.append(f'<div class="post-location">📍 {_html_escape(loc["poi_name"])}</div>')
 
-        # 评论
+        # comments
         comments = post.get("comments", [])
         if comments:
             parts.append('<div class="comments">')
@@ -751,7 +759,7 @@ h1 {{ text-align: center; color: #07c160; border-bottom: 2px solid #07c160; padd
                 else:
                     to_part = ""
                     if c.get("to_nickname"):
-                        to_part = f' 回复 <span class="comment-name">{_html_escape(c["to_nickname"])}</span>'
+                        to_part = f' replied to <span class="comment-name">{_html_escape(c["to_nickname"])}</span>'
                     parts.append(f'<div class="comment"><span class="comment-name">{_html_escape(c["from_nickname"])}</span>{to_part}: {_html_escape(c.get("content", ""))}</div>')
             parts.append('</div>')
 
@@ -765,46 +773,46 @@ h1 {{ text-align: center; color: #07c160; border-bottom: 2px solid #07c160; padd
 
 
 def export_sns_timeline():
-    """导出朋友圈动态主函数"""
+    """Main function for exporting Moments posts."""
     if not os.path.exists(SNS_DB_PATH):
-        print(f"朋友圈数据库不存在: {SNS_DB_PATH}")
-        print("请先运行「解密数据库」")
+        print(f"Moments database not found: {SNS_DB_PATH}")
+        print("Please run 'Decrypt Database' first.")
         return
 
-    # 加载联系人
+    # load contacts
     contact_map = _load_contact_map()
-    print(f"联系人: {len(contact_map)} 条")
+    print(f"Contacts: {len(contact_map)}")
 
     conn = sqlite3.connect(SNS_DB_PATH)
 
-    # 加载评论
-    print("加载评论数据...")
+    # load comments
+    print("Loading comment data...")
     comments_map = _load_comments(conn)
-    print(f"评论/点赞: {sum(len(v) for v in comments_map.values())} 条")
+    print(f"Comments/likes: {sum(len(v) for v in comments_map.values())}")
 
-    # 读取所有动态
-    print("读取朋友圈动态...")
+    # read all posts
+    print("Reading Moments posts...")
     rows = conn.execute(
         "SELECT tid, user_name, content FROM SnsTimeLine WHERE content IS NOT NULL"
     ).fetchall()
     conn.close()
 
-    print(f"共 {len(rows)} 条动态")
+    print(f"Total: {len(rows)} posts")
     if not rows:
         return
 
-    # 是否尝试下载媒体
+    # whether to attempt media download
     try_download = os.environ.get("WECHAT_SNS_DOWNLOAD_MEDIA", "0").strip() == "1"
 
-    # ── 构建缓存索引 ─────────────────────────────────────────────────────
-    print("扫描 SNS 图片缓存...")
+    # ── Build cache index ─────────────────────────────────────────────────────
+    print("Scanning SNS image cache...")
     cache_index = _build_sns_cache_index()
     index_mtimes = [e[0] for e in cache_index]
-    print(f"缓存索引: {len(cache_index)} 个有效图片文件")
+    print(f"Cache index: {len(cache_index)} valid image files")
 
-    # ── 按 user_name 分组 ─────────────────────────────────────────────────
+    # ── Group by user_name ────────────────────────────────────────────────────
     user_posts: dict[str, list] = {}  # user_name -> [post, ...]
-    user_nicknames: dict[str, str] = {}  # user_name -> nickname (从 XML 提取)
+    user_nicknames: dict[str, str] = {}  # user_name -> nickname (extracted from XML)
     skipped = 0
 
     for tid, user_name, content_xml in rows:
@@ -833,9 +841,9 @@ def export_sns_timeline():
             user_nicknames[key] = nick
 
     if skipped:
-        print(f"筛选跳过: {skipped} 条")
+        print(f"Filtered out: {skipped} posts")
 
-    # ── 按联系人输出 ──────────────────────────────────────────────────────
+    # ── Output per contact ────────────────────────────────────────────────────
     total_posts = 0
     cache_match_ok = 0
     cache_match_fail = 0
@@ -849,9 +857,9 @@ def export_sns_timeline():
         sns_dir = os.path.join(OUTPUT_DIR, dname, "SNS")
         os.makedirs(sns_dir, exist_ok=True)
 
-        # 用 set 处理同一秒多条动态的文件名冲突
+        # use a set to handle filename collisions when multiple posts share the same second
         used_names = set()
-        # image_files: {final_name: [(rel_path, ext), ...]} 用于 HTML 生成
+        # image_files: {final_name: [(rel_path, ext), ...]} used for HTML generation
         image_files: dict[str, list] = {}
 
         posts.sort(key=lambda p: p.get("create_time", 0))
@@ -867,7 +875,7 @@ def export_sns_timeline():
             used_names.add(final_name)
             post["_final_name"] = final_name
 
-            # ── 缓存图片匹配 ─────────────────────────────────────────
+            # ── Cache image matching ──────────────────────────────────
             media_list = post.get("media", [])
             if media_list and cache_index:
                 matches = _match_cache_images(
@@ -892,7 +900,7 @@ def export_sns_timeline():
                     else:
                         cache_match_fail += 1
 
-            # ── 网络下载（仅对缓存未匹配的媒体尝试） ─────────────────
+            # ── Network download (only for media not matched from cache) ──────
             if try_download and media_list:
                 existing_imgs = image_files.get(final_name, [])
                 existing_indices = {int(p.rsplit('_', 1)[1].split('.')[0]) for p, _ in existing_imgs} if existing_imgs else set()
@@ -904,7 +912,7 @@ def export_sns_timeline():
                         continue
                     save_name = os.path.join(sns_dir, f"{final_name}_{i}")
                     if _try_download_media(media_url, save_name):
-                        # 下载成功后更新 image_files
+                        # update image_files after successful download
                         for cand_ext in ('.jpg', '.png', '.gif', '.webp', '.bin'):
                             if os.path.exists(save_name + cand_ext):
                                 if final_name not in image_files:
@@ -915,7 +923,7 @@ def export_sns_timeline():
                     else:
                         media_download_fail += 1
 
-            # 保存 JSON（去掉内部字段）
+            # save JSON (strip internal fields)
             post_out = {k: v for k, v in post.items() if not k.startswith("_")}
             post_file = os.path.join(sns_dir, f"{final_name}.json")
             with open(post_file, 'w', encoding='utf-8') as f:
@@ -923,7 +931,7 @@ def export_sns_timeline():
 
             total_posts += 1
 
-        # 每个联系人的汇总 JSON
+        # per-contact summary JSON
         posts.sort(key=lambda p: p.get("create_time", 0), reverse=True)
         summary_posts = [{k: v for k, v in p.items() if not k.startswith("_")} for p in posts]
         summary_path = os.path.join(sns_dir, "timeline.json")
@@ -936,17 +944,17 @@ def export_sns_timeline():
                 "posts": summary_posts,
             }, f, ensure_ascii=False, indent=2)
 
-        # 生成 HTML 时间线
+        # generate HTML timeline
         _generate_timeline_html(dname, posts, sns_dir, image_files)
 
-        print(f"  {dname}: {len(posts)} 条动态")
+        print(f"  {dname}: {len(posts)} posts")
 
-    print(f"\n完成: {len(user_posts)} 个联系人, 共 {total_posts} 条动态")
+    print(f"\nDone: {len(user_posts)} contacts, {total_posts} posts total")
     if cache_index:
-        print(f"缓存匹配: 成功 {cache_match_ok}, 失败 {cache_match_fail}")
+        print(f"Cache matches: {cache_match_ok} succeeded, {cache_match_fail} failed")
     if try_download:
-        print(f"媒体下载: 成功 {media_download_ok}, 失败 {media_download_fail}")
-    print(f"输出目录: {os.path.abspath(OUTPUT_DIR)}")
+        print(f"Media downloads: {media_download_ok} succeeded, {media_download_fail} failed")
+    print(f"Output directory: {os.path.abspath(OUTPUT_DIR)}")
 
 
 if __name__ == "__main__":

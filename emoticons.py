@@ -1,7 +1,7 @@
 """
-表情包公共模块 — 从 emoticon.db 构建 MD5→CDN 映射 + 下载
+Emoticon common module — builds MD5→CDN mapping from emoticon.db + download
 
-供 monitor_web.py、export_emoticons.py 复用。
+Shared by monitor_web.py and export_emoticons.py.
 """
 import os
 import re
@@ -21,7 +21,7 @@ WAL_FRAME_HEADER_SZ = 24
 
 
 def _full_decrypt(db_path, out_path, enc_key):
-    """全量解密数据库（跳过 HMAC 校验，适合运行时使用）"""
+    """Fully decrypt the database (skips HMAC verification, suitable for runtime use)."""
     file_size = os.path.getsize(db_path)
     total_pages = file_size // PAGE_SZ
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -37,7 +37,7 @@ def _full_decrypt(db_path, out_path, enc_key):
 
 
 def _decrypt_wal(wal_path, out_path, enc_key):
-    """解密 WAL 有效 frame 并 patch 到已解密的 DB 副本"""
+    """Decrypt valid WAL frames and patch them into the decrypted DB copy."""
     if not os.path.exists(wal_path):
         return
     wal_size = os.path.getsize(wal_path)
@@ -68,9 +68,9 @@ def _decrypt_wal(wal_path, out_path, enc_key):
 
 
 def build_emoji_lookup(keys_dict, db_dir):
-    """从 emoticon.db 构建 emoji md5 → URL 映射。
+    """Build an emoji md5 → URL mapping from emoticon.db.
 
-    返回: {md5: {cdn_url, aes_key, encrypt_url, caption, product_id}}
+    Returns: {md5: {cdn_url, aes_key, encrypt_url, caption, product_id}}
     """
     key_info = get_key_info(keys_dict, os.path.join("emoticon", "emoticon.db"))
     if not key_info:
@@ -89,14 +89,14 @@ def build_emoji_lookup(keys_dict, db_dir):
         if os.path.exists(wal):
             _decrypt_wal(wal, dst, enc_key)
     except Exception as e:
-        print(f"[emoticons] emoticon.db 解密失败: {e}", flush=True)
+        print(f"[emoticons] emoticon.db decryption failed: {e}", flush=True)
         return {}
 
     try:
         conn = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
         lookup = {}
 
-        # 1. NonStore 表情（有独立 cdn_url）
+        # 1. NonStore emoticons (with individual cdn_url)
         rows = conn.execute(
             "SELECT md5, aes_key, cdn_url, encrypt_url, product_id FROM kNonStoreEmoticonTable"
         ).fetchall()
@@ -114,7 +114,7 @@ def build_emoji_lookup(keys_dict, db_dir):
 
         non_store_count = len(lookup)
 
-        # 2. Store 表情（尝试构造 cdn_url）
+        # 2. Store emoticons (attempt to construct cdn_url)
         store_rows = conn.execute(
             "SELECT package_id_, md5_ FROM kStoreEmoticonFilesTable"
         ).fetchall()
@@ -132,7 +132,7 @@ def build_emoji_lookup(keys_dict, db_dir):
                     }
                     store_added += 1
 
-        # 3. 收集 caption（表情描述）
+        # 3. Collect captions (emoticon descriptions)
         try:
             captions = conn.execute(
                 "SELECT md5_, caption_ FROM kStoreEmoticonCaptionsTable WHERE language_='default'"
@@ -145,12 +145,12 @@ def build_emoji_lookup(keys_dict, db_dir):
 
         conn.close()
         print(
-            f"[emoticons] 已加载 {non_store_count} NonStore + {store_added} Store = {len(lookup)} 个表情映射",
+            f"[emoticons] Loaded {non_store_count} NonStore + {store_added} Store = {len(lookup)} emoticon mappings",
             flush=True,
         )
         return lookup
     except Exception as e:
-        print(f"[emoticons] 构建映射失败: {e}", flush=True)
+        print(f"[emoticons] Failed to build mapping: {e}", flush=True)
         return {}
     finally:
         try:
@@ -160,11 +160,11 @@ def build_emoji_lookup(keys_dict, db_dir):
 
 
 def convert_hevc_to_jpeg(hevc_path, jpeg_path):
-    """将 wxgf/HEVC 文件转为 JPEG
+    """Convert a wxgf/HEVC file to JPEG.
 
-    wxgf 是微信自有格式: wxgf header + ICC profile + HEVC NAL units
-    通过扫描 HEVC VPS start code (00 00 00 01 40 01) 定位 Annex B 流，
-    再用 PyAV (ffmpeg) 解码首帧为 JPEG。
+    wxgf is WeChat's proprietary format: wxgf header + ICC profile + HEVC NAL units.
+    Locates the Annex B stream by scanning for the HEVC VPS start code (00 00 00 01 40 01),
+    then decodes the first frame to JPEG using PyAV (ffmpeg).
     """
     try:
         import av
@@ -172,16 +172,16 @@ def convert_hevc_to_jpeg(hevc_path, jpeg_path):
         with open(hevc_path, 'rb') as f:
             data = f.read()
 
-        # 扫描 HEVC Annex B VPS start code: 00 00 00 01 40 01
+        # Scan for HEVC Annex B VPS start code: 00 00 00 01 40 01
         vps_sig = b'\x00\x00\x00\x01\x40\x01'
         hevc_start = data.find(vps_sig)
         if hevc_start < 0:
-            # fallback: 找 SPS (00 00 00 01 42 01)
+            # fallback: look for SPS (00 00 00 01 42 01)
             hevc_start = data.find(b'\x00\x00\x00\x01\x42\x01')
         if hevc_start < 0:
             return None
 
-        # 提取 HEVC Annex B 流并用 PyAV 解码
+        # Extract HEVC Annex B stream and decode with PyAV
         h265_path = hevc_path + '.h265'
         with open(h265_path, 'wb') as f:
             f.write(data[hevc_start:])
@@ -206,15 +206,15 @@ def convert_hevc_to_jpeg(hevc_path, jpeg_path):
 
 
 def download_emoji(md5, lookup, out_dir):
-    """从 CDN 下载单个表情到 out_dir，返回文件名或 None。
+    """Download a single emoticon from CDN to out_dir; returns filename or None.
 
-    lookup: build_emoji_lookup() 返回的字典
+    lookup: dict returned by build_emoji_lookup()
     """
     info = lookup.get(md5)
     if not info:
         return None
 
-    # 检查是否已缓存
+    # Check if already cached
     for ext in (".gif", ".png", ".jpg", ".webp"):
         cached = os.path.join(out_dir, f"{md5}{ext}")
         if os.path.exists(cached):
@@ -225,7 +225,7 @@ def download_emoji(md5, lookup, out_dir):
     encrypt_url = info.get("encrypt_url", "")
 
     data = None
-    # 方法1: 从 cdn_url 直接下载（未加密）
+    # Method 1: download directly from cdn_url (unencrypted)
     if cdn_url:
         try:
             req = urllib.request.Request(cdn_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -234,7 +234,7 @@ def download_emoji(md5, lookup, out_dir):
         except Exception:
             pass
 
-    # 方法2: 从 encrypt_url 下载 + AES-CBC 解密
+    # Method 2: download from encrypt_url + AES-CBC decrypt
     if not data and encrypt_url and aes_key:
         try:
             req = urllib.request.Request(encrypt_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -253,7 +253,7 @@ def download_emoji(md5, lookup, out_dir):
     if not data or len(data) < 4:
         return None
 
-    # 检测格式
+    # Detect format
     if data[:3] == b"\xff\xd8\xff":
         ext = ".jpg"
     elif data[:4] == b"\x89PNG":
@@ -263,7 +263,7 @@ def download_emoji(md5, lookup, out_dir):
     elif data[:4] == b"RIFF":
         ext = ".webp"
     elif data[:4] == b"WXGF" or b"\x00\x00\x00\x01\x40\x01" in data[:256]:
-        # wxgf/wxam (HEVC): 先存临时文件再转 JPEG
+        # wxgf/wxam (HEVC): save to temp file first, then convert to JPEG
         os.makedirs(out_dir, exist_ok=True)
         tmp_path = os.path.join(out_dir, f"{md5}.wxgf")
         with open(tmp_path, "wb") as f:
@@ -272,7 +272,7 @@ def download_emoji(md5, lookup, out_dir):
         if convert_hevc_to_jpeg(tmp_path, jpg_path):
             os.unlink(tmp_path)
             return f"{md5}.jpg"
-        # 转换失败，保留 .bin
+        # Conversion failed, keep as .bin
         os.replace(tmp_path, os.path.join(out_dir, f"{md5}.bin"))
         return f"{md5}.bin"
     else:

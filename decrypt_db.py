@@ -1,9 +1,9 @@
 """
-WeChat 4.0 数据库解密器
+WeChat 4.0 Database Decryptor
 
-使用从进程内存提取的per-DB enc_key解密SQLCipher 4加密的数据库
-参数: SQLCipher 4, AES-256-CBC, HMAC-SHA512, reserve=80, page_size=4096
-密钥来源: all_keys.json (由find_all_keys.py从内存提取)
+Decrypts SQLCipher 4 encrypted databases using per-DB enc_key extracted from process memory.
+Parameters: SQLCipher 4, AES-256-CBC, HMAC-SHA512, reserve=80, page_size=4096
+Key source: all_keys.json (extracted from memory by find_all_keys.py)
 """
 import hashlib, struct, os, sys, json
 import hmac as hmac_mod
@@ -30,13 +30,13 @@ KEYS_FILE = _cfg["keys_file"]
 
 
 def derive_mac_key(enc_key, salt):
-    """从enc_key派生HMAC密钥"""
+    """Derive HMAC key from enc_key"""
     mac_salt = bytes(b ^ 0x3a for b in salt)
     return hashlib.pbkdf2_hmac("sha512", enc_key, mac_salt, 2, dklen=KEY_SZ)
 
 
 def decrypt_page(enc_key, page_data, pgno):
-    """解密单个页面，输出4096字节的标准SQLite页面"""
+    """Decrypt a single page, output a standard 4096-byte SQLite page"""
     iv = page_data[PAGE_SZ - RESERVE_SZ : PAGE_SZ - RESERVE_SZ + IV_SZ]
 
     if pgno == 1:
@@ -44,7 +44,7 @@ def decrypt_page(enc_key, page_data, pgno):
         cipher = AES.new(enc_key, AES.MODE_CBC, iv)
         decrypted = cipher.decrypt(encrypted)
         page = bytearray(SQLITE_HDR + decrypted + b'\x00' * RESERVE_SZ)
-        # 保留 reserve=80, B-tree 基于 usable_size=4016 构建
+        # Preserve reserve=80, B-tree is built based on usable_size=4016
         return bytes(page)
     else:
         encrypted = page_data[:PAGE_SZ - RESERVE_SZ]
@@ -54,22 +54,22 @@ def decrypt_page(enc_key, page_data, pgno):
 
 
 def decrypt_database(db_path, out_path, enc_key):
-    """解密整个数据库文件"""
+    """Decrypt the entire database file"""
     file_size = os.path.getsize(db_path)
     total_pages = file_size // PAGE_SZ
 
     if file_size % PAGE_SZ != 0:
-        print(f"  [WARN] 文件大小 {file_size} 不是 {PAGE_SZ} 的倍数")
+        print(f"  [WARN] File size {file_size} is not a multiple of {PAGE_SZ}")
         total_pages += 1
 
     with open(db_path, 'rb') as fin:
         page1 = fin.read(PAGE_SZ)
 
     if len(page1) < PAGE_SZ:
-        print(f"  [ERROR] 文件太小")
+        print(f"  [ERROR] File too small")
         return False
 
-    # 提取salt并派生mac_key, 验证page 1
+    # Extract salt and derive mac_key, verify page 1
     salt = page1[:SALT_SZ]
     mac_key = derive_mac_key(enc_key, salt)
     p1_hmac_data = page1[SALT_SZ : PAGE_SZ - RESERVE_SZ + IV_SZ]
@@ -77,12 +77,12 @@ def decrypt_database(db_path, out_path, enc_key):
     hm = hmac_mod.new(mac_key, p1_hmac_data, hashlib.sha512)
     hm.update(struct.pack('<I', 1))
     if hm.digest() != p1_stored_hmac:
-        print(f"  [ERROR] Page 1 HMAC验证失败! salt: {salt.hex()}")
+        print(f"  [ERROR] Page 1 HMAC verification failed! salt: {salt.hex()}")
         return False
 
     print(f"  HMAC OK, {total_pages} pages")
 
-    # 解密所有页面
+    # Decrypt all pages
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(db_path, 'rb') as fin, open(out_path, 'wb') as fout:
         for pgno in range(1, total_pages + 1):
@@ -98,38 +98,38 @@ def decrypt_database(db_path, out_path, enc_key):
 
             if pgno == 1:
                 if decrypted[:16] != SQLITE_HDR:
-                    print(f"  [WARN] 解密后header不匹配!")
+                    print(f"  [WARN] Header mismatch after decryption!")
 
             if pgno % 10000 == 0:
-                print(f"  进度: {pgno}/{total_pages} ({100*pgno/total_pages:.1f}%)")
+                print(f"  Progress: {pgno}/{total_pages} ({100*pgno/total_pages:.1f}%)")
 
     return True
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="WeChat 4.0 数据库解密器"
+        description="WeChat 4.0 Database Decryptor"
     )
     parser.add_argument(
         "-i", "--incremental",
         action="store_true",
-        help="增量模式：仅当源 .db 更新于已解密文件时才重新解密",
+        help="Incremental mode: only re-decrypt when the source .db is newer than the decrypted file",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="预览模式：显示将要解密的数据库列表",
+        help="Dry-run mode: show the list of databases that would be decrypted",
     )
     args = parser.parse_args(argv)
 
     print("=" * 60)
-    print("  WeChat 4.0 数据库解密器")
+    print("  WeChat 4.0 Database Decryptor")
     print("=" * 60)
 
-    # 加载密钥
+    # Load keys
     if not os.path.exists(KEYS_FILE):
-        print(f"[ERROR] 密钥文件不存在: {KEYS_FILE}")
-        print("请先运行 python main.py decrypt 提取密钥并解密")
+        print(f"[ERROR] Keys file not found: {KEYS_FILE}")
+        print("Please run python main.py decrypt first to extract keys and decrypt")
         sys.exit(1)
 
 
@@ -137,13 +137,13 @@ def main(argv=None):
         keys = json.load(f)
 
     keys = strip_key_metadata(keys)
-    print(f"\n加载 {len(keys)} 个数据库密钥")
-    print(f"输出目录: {OUT_DIR}")
+    print(f"\nLoaded {len(keys)} database keys")
+    print(f"Output directory: {OUT_DIR}")
     if args.incremental:
-        print(f"模式: 增量 (跳过未变更的数据库)")
+        print(f"Mode: incremental (skipping unchanged databases)")
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # 收集所有DB文件
+    # Collect all DB files
     db_files = []
     for root, dirs, files in os.walk(DB_DIR):
         for f in files:
@@ -153,9 +153,9 @@ def main(argv=None):
                 sz = os.path.getsize(path)
                 db_files.append((rel, path, sz))
 
-    db_files.sort(key=lambda x: x[2])  # 从小到大
+    db_files.sort(key=lambda x: x[2])  # ascending by size
 
-    print(f"找到 {len(db_files)} 个数据库文件\n")
+    print(f"Found {len(db_files)} database files\n")
 
     success = 0
     failed = 0
@@ -166,29 +166,29 @@ def main(argv=None):
     for rel, path, sz in db_files:
         key_info = get_key_info(keys, rel)
         if not key_info:
-            print(f"SKIP: {rel} (无密钥，如已安装微信补丁可能需要重新运行密钥提取)")
+            print(f"SKIP: {rel} (no key; if WeChat patch is installed you may need to re-run key extraction)")
             skipped += 1
             continue
 
         out_path = os.path.join(OUT_DIR, rel)
 
-        # 增量模式：检查 mtime
+        # Incremental mode: check mtime
         if args.incremental and os.path.exists(out_path):
             src_mtime = os.path.getmtime(path)
             dst_mtime = os.path.getmtime(out_path)
             if src_mtime <= dst_mtime:
                 skipped_unmodified += 1
                 if args.dry_run:
-                    print(f"SKIP: {rel} (未修改)")
+                    print(f"SKIP: {rel} (unmodified)")
                 continue
             elif args.dry_run:
-                print(f"NEW: {rel} (源较新)")
+                print(f"NEW: {rel} (source is newer)")
             elif not args.dry_run:
-                print(f"更新: {rel} ({sz/1024/1024:.1f}MB) ...", end=" ")
+                print(f"UPDATE: {rel} ({sz/1024/1024:.1f}MB) ...", end=" ")
         elif args.dry_run:
             print(f"NEW: {rel} ({sz/1024/1024:.1f}MB)")
         else:
-            print(f"解密: {rel} ({sz/1024/1024:.1f}MB) ...", end=" ")
+            print(f"DECRYPT: {rel} ({sz/1024/1024:.1f}MB) ...", end=" ")
 
         if args.dry_run:
             skipped_unmodified += 1
@@ -197,7 +197,7 @@ def main(argv=None):
         enc_key = bytes.fromhex(key_info["enc_key"])
         ok = decrypt_database(path, out_path, enc_key)
         if ok:
-            # SQLite验证
+            # SQLite validation
             try:
                 import sqlite3
                 conn = sqlite3.connect(out_path)
@@ -206,18 +206,18 @@ def main(argv=None):
                 table_names = [t[0] for t in tables]
                 print(f"  OK! 表: {', '.join(table_names[:5])}", end="")
                 if len(table_names) > 5:
-                    print(f" ...共{len(table_names)}个", end="")
+                    print(f" ...{len(table_names)} total", end="")
                 print()
                 success += 1
                 total_bytes += sz
             except Exception as e:
-                print(f"  [WARN] SQLite验证失败: {e}")
+                print(f"  [WARN] SQLite validation failed: {e}")
                 failed += 1
         else:
             failed += 1
 
-        # 清理 sqlite3.connect() 验证遗留的 -shm/-wal 空文件
-        # 避免后续工具打开 .db 时优先读旧 WAL 报 "database disk image is malformed"
+        # Clean up empty -shm/-wal files left by sqlite3.connect() validation
+        # Prevents subsequent tools from reading a stale WAL and getting "database disk image is malformed"
         for suffix in ("-shm", "-wal"):
             residual = out_path + suffix
             if os.path.exists(residual):
@@ -228,14 +228,14 @@ def main(argv=None):
 
     if args.dry_run:
         print(f"\n{'='*60}")
-        print(f"预览: 需要解密 {skipped_unmodified} 个数据库")
+        print(f"Dry-run: {skipped_unmodified} databases would be decrypted")
         return
 
     print(f"\n{'='*60}")
-    inc_note = f" (跳过 {skipped_unmodified} 个未变更)" if skipped_unmodified else ""
-    print(f"结果: {success} 成功, {failed} 失败, {skipped} 跳过(无密钥){inc_note}, 共 {len(db_files)} 个")
-    print(f"解密数据量: {total_bytes/1024/1024/1024:.1f}GB")
-    print(f"解密文件在: {OUT_DIR}")
+    inc_note = f" (skipped {skipped_unmodified} unchanged)" if skipped_unmodified else ""
+    print(f"Result: {success} succeeded, {failed} failed, {skipped} skipped (no key){inc_note}, {len(db_files)} total")
+    print(f"Total decrypted: {total_bytes/1024/1024/1024:.1f}GB")
+    print(f"Decrypted files in: {OUT_DIR}")
 
 
 if __name__ == '__main__':

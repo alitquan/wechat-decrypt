@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""批量导出所有微信聊天记录为 JSON 文件，可选附带语音转录。
+"""Bulk export all WeChat chat histories to JSON files, with optional voice transcription.
 
-此脚本将导出所有会话的聊天记录，输出格式与 export_chat.py 完全一致。
-支持导出到指定目录，默认输出到 ./exported_chats 目录。
+This script exports chat histories for all sessions in the same output format as export_chat.py.
+Supports exporting to a specified directory; defaults to ./exported_chats.
 
-语音转录通过 mcp_server 的 backend 配置驱动（config.json 中设置
-transcription_backend 为 whisper_cpp / openai / local）。未启用 backend
-或缺少依赖时仅导出文本消息，不报错。
+Voice transcription is driven by the backend configured in mcp_server (set
+transcription_backend to whisper_cpp / openai / local in config.json). If no backend
+is enabled or dependencies are missing, only text messages are exported without error.
 
-用法:
-    python3 export_all_chats.py                         # 全量导出所有会话
+Usage:
+    python3 export_all_chats.py                         # Full export of all sessions
     python3 export_all_chats.py --write-plan-csv export_plan.csv
     python3 export_all_chats.py output_dir --from-plan-csv export_plan.csv
-    python3 export_all_chats.py --with-transcriptions   # 全量导出 + 转录语音
-    python3 export_all_chats.py -i                      # 增量（只导出最新消息）
-    python3 export_all_chats.py --start 2025-01-01      # 按日期范围
+    python3 export_all_chats.py --with-transcriptions   # Full export + transcribe voice
+    python3 export_all_chats.py -i                      # Incremental (only export latest messages)
+    python3 export_all_chats.py --start 2025-01-01      # By date range
     python3 export_all_chats.py --end 2025-01-31
     python3 export_all_chats.py --start 2025-01-01 --end 2025-01-31 -t
 """
@@ -34,7 +34,7 @@ from pathlib import Path
 
 import mcp_server
 
-# 尝试导入 tqdm 作为进度条（可选）
+# Try to import tqdm for progress bar (optional)
 try:
     from tqdm import tqdm as _tqdm
 except ImportError:
@@ -67,8 +67,8 @@ _UNSAFE_FILENAME_RE = re.compile(r'[\\/:*?"<>|]')
 
 
 def _parse_timestamp(ts_str):
-    """解析时间字符串返回 unix timestamp。
-    支持格式: '2025-01-01', '2025-01-01 14:30', '2025-01-01T14:30:00'
+    """Parse a time string and return a Unix timestamp.
+    Supported formats: '2025-01-01', '2025-01-01 14:30', '2025-01-01T14:30:00'
     """
     for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
@@ -83,7 +83,7 @@ def _parse_timestamp(ts_str):
 
 
 def _get_last_message_ts(json_path):
-    """读取已有 JSON 的最后一条消息时间戳"""
+    """Read the timestamp of the last message from an existing JSON file."""
     try:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
@@ -96,7 +96,7 @@ def _get_last_message_ts(json_path):
 
 
 def _get_existing_messages(json_path):
-    """读取已有 JSON 的消息列表（增量合并用）"""
+    """Read the message list from an existing JSON file (used for incremental merging)."""
     try:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
@@ -182,7 +182,7 @@ def _read_json_string_field(prefix, field):
 
 
 def _read_export_file_identity(path):
-    """只读取 JSON 文件头部，避免为建索引加载巨大 messages 数组。"""
+    """Read only the header of a JSON file to avoid loading a large messages array for indexing."""
     try:
         with open(path, encoding="utf-8") as f:
             prefix = f.read(256 * 1024)
@@ -327,7 +327,7 @@ def _choose_export_filename(output_dir, desired_filename, username):
             return candidate
         if _read_export_file_identity(candidate_path).get("username") == username:
             return candidate
-    raise RuntimeError(f"无法为 {username} 生成不冲突的导出文件名")
+    raise RuntimeError(f"Cannot generate a non-conflicting export filename for {username}")
 
 
 def _resolve_indexed_export_path(output_dir, username, display_name, is_group):
@@ -401,7 +401,7 @@ def _update_export_index(output_dir, index, username, display_name, is_group,
 
 
 def _load_session_usernames(session_db):
-    """读取 SessionTable 中的会话 username，保持数据库原始顺序。"""
+    """Read session usernames from SessionTable, preserving the original database order."""
     with closing(sqlite3.connect(session_db)) as conn:
         return [
             u for u, _ in conn.execute(
@@ -411,7 +411,7 @@ def _load_session_usernames(session_db):
 
 
 def _build_chat_rows(sessions, names, contact_full=None):
-    """构建可展示、可选择的会话行。"""
+    """Build displayable and selectable session rows."""
     contact_meta = {
         item.get("username"): item
         for item in (contact_full or [])
@@ -480,7 +480,7 @@ def _where_for_time_range(start_ts=None, end_ts=None, column="create_time"):
 
 def _query_message_table_plan_stats(db_path, table_name, start_ts=None, end_ts=None):
     if not mcp_server._is_safe_msg_table_name(table_name):
-        raise ValueError(f"非法消息表名: {table_name}")
+        raise ValueError(f"Invalid message table name: {table_name}")
     where_sql, params = _where_for_time_range(start_ts, end_ts)
     sql = f"""
         SELECT COUNT(*), MIN(create_time), MAX(create_time),
@@ -731,7 +731,7 @@ def _fetch_existing_message_tables(conn, table_names):
 
 def _query_message_table_plan_stats_conn(conn, table_name, start_ts=None, end_ts=None):
     if not mcp_server._is_safe_msg_table_name(table_name):
-        raise ValueError(f"非法消息表名: {table_name}")
+        raise ValueError(f"Invalid message table name: {table_name}")
     where_sql, params = _where_for_time_range(start_ts, end_ts)
     sql = f"""
         SELECT COUNT(*), MIN(create_time), MAX(create_time),
@@ -909,14 +909,14 @@ def _finalize_plan_stats(acc):
 def _collect_all_plan_stats(chat_rows, start_ts=None, end_ts=None,
                             size_mode="estimate"):
     usernames = [row["username"] for row in chat_rows]
-    print("[*] 批量统计消息表...", flush=True)
+    print("[*] Batch collecting message table stats...", flush=True)
     stats = _collect_message_stats_batch(
         usernames,
         start_ts=start_ts,
         end_ts=end_ts,
     )
 
-    print("[*] 批量统计资源附件...", flush=True)
+    print("[*] Batch collecting resource attachment stats...", flush=True)
     resource_values, resource_statuses = _collect_resource_estimates_batch(
         usernames,
         start_ts=start_ts,
@@ -926,7 +926,7 @@ def _collect_all_plan_stats(chat_rows, start_ts=None, end_ts=None,
         stats[username]["attachment_estimated_bytes"] += resource_values[username]
         stats[username]["statuses"].update(resource_statuses[username])
 
-    print("[*] 批量统计语音数据...", flush=True)
+    print("[*] Batch collecting voice data stats...", flush=True)
     voice_values, voice_statuses = _collect_voice_estimates_batch(
         usernames,
         start_ts=start_ts,
@@ -937,8 +937,8 @@ def _collect_all_plan_stats(chat_rows, start_ts=None, end_ts=None,
         stats[username]["statuses"].update(voice_statuses[username])
 
     if size_mode == "scan":
-        print("[*] 扫描本地附件目录...", flush=True)
-        iterable = _tqdm(usernames, desc="扫描附件") if _tqdm else usernames
+        print("[*] Scanning local attachment directories...", flush=True)
+        iterable = _tqdm(usernames, desc="Scanning attachments") if _tqdm else usernames
         for username in iterable:
             scanned_bytes, scan_status = _scan_local_attachment_bytes(username)
             stats[username]["attachment_scanned_bytes"] = scanned_bytes
@@ -959,7 +959,7 @@ def _build_plan_csv_rows(chat_rows, start_ts=None, end_ts=None, size_mode="estim
         size_mode=size_mode,
     )
     rows = []
-    iterable = _tqdm(chat_rows, desc="统计会话") if _tqdm else chat_rows
+    iterable = _tqdm(chat_rows, desc="Collecting session stats") if _tqdm else chat_rows
     for row in iterable:
         username = row["username"]
         stats = stats_by_username[username]
@@ -982,7 +982,7 @@ def _build_plan_csv_rows(chat_rows, start_ts=None, end_ts=None, size_mode="estim
 
 def _validate_plan_mode(plan_mode):
     if plan_mode not in (PLAN_MODE_BLACKLIST, PLAN_MODE_WHITELIST):
-        raise ValueError(f"未知导出计划模式: {plan_mode}")
+        raise ValueError(f"Unknown export plan mode: {plan_mode}")
     return plan_mode
 
 
@@ -1009,15 +1009,15 @@ def _load_selected_usernames_from_plan_csv(
     with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames or "username" not in reader.fieldnames:
-            raise ValueError("CSV 缺少 username 列")
+            raise ValueError("CSV is missing the 'username' column")
         for line_no, row in enumerate(reader, 2):
             username = (row.get("username") or "").strip()
             if not username:
-                raise ValueError(f"第 {line_no} 行缺少 username")
+                raise ValueError(f"Row {line_no} is missing a username")
             if username in seen:
                 raise ValueError(
-                    f"CSV 中 username 重复: {username} "
-                    f"(第 {seen[username]} 行和第 {line_no} 行)"
+                    f"Duplicate username in CSV: {username} "
+                    f"(rows {seen[username]} and {line_no})"
                 )
             seen[username] = line_no
 
@@ -1029,7 +1029,7 @@ def _load_selected_usernames_from_plan_csv(
             if not should_export:
                 continue
             if username not in valid_usernames:
-                raise ValueError(f"第 {line_no} 行 username 当前不存在: {username}")
+                raise ValueError(f"Row {line_no} username does not currently exist: {username}")
             selected.append(username)
     return selected
 
@@ -1037,14 +1037,14 @@ def _load_selected_usernames_from_plan_csv(
 def export_one(username, output_dir, names, transcribe=False,
                start_ts=None, end_ts=None, incremental=False):
     """
-    导出单个会话。
+    Export a single session.
 
-    参数:
-        start_ts: 消息起始时间戳（None = 全部）
-        end_ts: 消息结束时间戳（None = 全部）
-        incremental: 增量模式（追加到已有消息，跳过重复）
+    Args:
+        start_ts: Message start timestamp (None = all)
+        end_ts: Message end timestamp (None = all)
+        incremental: Incremental mode (append to existing messages, skip duplicates)
 
-    返回: (成功标志, 总消息数, 新增消息数, 错误信息)
+    Returns: (success_flag, total_message_count, new_message_count, error_message)
     """
     ctx = mcp_server._resolve_chat_context(username)
     if ctx is None:
@@ -1056,7 +1056,7 @@ def export_one(username, output_dir, names, transcribe=False,
     if not message_tables:
         return False, 0, 0, "no tables"
 
-    # 输出文件名可随备注变化；索引用 username 维持稳定匹配。
+    # The output filename may change with the contact remark; the index uses username for stable matching.
     try:
         out_path, export_index = _resolve_indexed_export_path(
             output_dir, username, display_name, ctx["is_group"]
@@ -1064,7 +1064,7 @@ def export_one(username, output_dir, names, transcribe=False,
     except Exception as e:
         return False, 0, 0, f"export index error: {e}"
 
-    # 增量模式：读取已有消息和最后时间戳
+    # Incremental mode: read existing messages and the last timestamp
     existing_msgs = []
     last_ts = 0
     if incremental and os.path.isfile(out_path):
@@ -1073,9 +1073,9 @@ def export_one(username, output_dir, names, transcribe=False,
         if last_ts and (start_ts is None or start_ts < last_ts):
             start_ts = last_ts
 
-    # 如果提供了 start_ts/end_ts 但没有增量数据，仍需查询
+    # If start_ts/end_ts is provided but there is no incremental data, still query normally
     if start_ts is not None and incremental and not existing_msgs:
-        # 无增量目标文件，退化为普通导出
+        # No incremental target file, fall back to normal export
         incremental = False
 
     new_rows = []
@@ -1086,7 +1086,7 @@ def export_one(username, output_dir, names, transcribe=False,
             with closing(sqlite3.connect(db_path)) as conn:
                 id_to_username = mcp_server._load_name2id_maps(conn)
 
-                # 增量模式：只查 start_ts 之后的消息
+                # Incremental mode: only query messages after start_ts
                 if start_ts is not None or end_ts is not None:
                     rows = mcp_server._query_messages(
                         conn, table_name,
@@ -1107,14 +1107,14 @@ def export_one(username, output_dir, names, transcribe=False,
 
     local_ids_existing = {m.get("local_id") for m in existing_msgs}
 
-    # 构建已有消息的 local_id → message 映射（用于合并时保留 transcription）
+    # Build a local_id -> message mapping of existing messages (to preserve transcription during merge)
     existing_by_lid = {m.get("local_id"): m for m in existing_msgs}
 
     new_messages = []
     for row, id_to_username in new_rows:
         local_id, local_type, create_time, real_sender_id, content, ct = row
 
-        # 增量模式：跳过已存在的消息
+        # Incremental mode: skip already-existing messages
         if incremental and local_id in local_ids_existing:
             continue
 
@@ -1137,16 +1137,16 @@ def export_one(username, output_dir, names, transcribe=False,
                 msg[k] = v
         new_messages.append(msg)
 
-    # 合并消息
+    # Merge messages
     messages = existing_msgs + new_messages
     new_count = len(new_messages)
 
     if not messages:
         return False, 0, 0, "empty"
 
-    # ── 语音转录 ──────────────────────────────────────────────
+    # ── Voice transcription ───────────────────────────────────
     if transcribe:
-        # 只需转录新消息中的语音
+        # Only transcribe voice messages in new messages
         voices_to_transcribe = new_messages if incremental else [
             m for m in messages
             if m.get("type") == "voice" and not m.get("transcription")
@@ -1177,11 +1177,11 @@ def export_one(username, output_dir, names, transcribe=False,
             display = names.get(username, username)
             voice_total = len(voices_to_transcribe)
             print(
-                f"   转录: {transcribed}/{voice_total} 条语音"
-                + (f" ({failed} 失败)" if failed else "")
+                f"   Transcribed: {transcribed}/{voice_total} voice messages"
+                + (f" ({failed} failed)" if failed else "")
             )
 
-    # ── 写文件 ────────────────────────────────────────────────
+    # ── Write file ───────────────────────────────────────────
     output = {
         "chat": display_name,
         "username": username,
@@ -1412,7 +1412,7 @@ _BACKEND_CACHE = None
 
 
 def _resolve_backend():
-    """解析转录 backend，结果缓存以避免重复检测。"""
+    """Resolve the transcription backend and cache the result to avoid repeated detection."""
     global _BACKEND_CACHE
     if _BACKEND_CACHE is None:
         try:
@@ -1424,20 +1424,20 @@ def _resolve_backend():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="批量导出所有微信聊天记录为 JSON 文件，可选附带语音转录",
+        description="Bulk export all WeChat chat histories to JSON files, with optional voice transcription",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例:
-    python3 export_all_chats.py                           全量导出所有会话
+Examples:
+    python3 export_all_chats.py                           Full export of all sessions
     python3 export_all_chats.py --write-plan-csv export_plan.csv
     python3 export_all_chats.py --write-plan-csv export_plan.csv --plan-mode whitelist
     python3 export_all_chats.py --write-plan-csv export_plan.csv --size-mode scan
     python3 export_all_chats.py output_dir --from-plan-csv export_plan.csv
     python3 export_all_chats.py output_dir --from-plan-csv export_plan.csv --plan-mode whitelist
-    python3 export_all_chats.py -t                        全量导出 + 转录语音
-    python3 export_all_chats.py -i                        增量（追加新消息）
-    python3 export_all_chats.py --start 2025-01-01        按日期范围导出
-    python3 export_all_chats.py --end 2025-01-31          按日期范围导出
+    python3 export_all_chats.py -t                        Full export + transcribe voice
+    python3 export_all_chats.py -i                        Incremental (append new messages)
+    python3 export_all_chats.py --start 2025-01-01        Export by date range
+    python3 export_all_chats.py --end 2025-01-31          Export by date range
     python3 export_all_chats.py --start 2025-01-01 --end 2025-01-31 -t
 """,
     )
@@ -1445,75 +1445,75 @@ def main(argv=None):
         "output_dir",
         nargs="?",
         default=None,
-        help="输出目录路径 (默认: ./exported_chats)",
+        help="Output directory path (default: ./exported_chats)",
     )
     parser.add_argument(
         "-t",
         "--with-transcriptions",
         action="store_true",
-        help="导出时一并转录语音消息（依赖 config.json 配置的 backend）",
+        help="Also transcribe voice messages during export (requires a backend configured in config.json)",
     )
     parser.add_argument(
         "--write-plan-csv",
         default=None,
-        help="生成可人工编辑的导出计划 CSV，不导出聊天",
+        help="Generate a manually editable export plan CSV without exporting chats",
     )
     parser.add_argument(
         "--from-plan-csv",
         default=None,
-        help="读取导出计划 CSV，按 --plan-mode 判断哪些 username 需要导出",
+        help="Read an export plan CSV and determine which usernames to export based on --plan-mode",
     )
     parser.add_argument(
         "--plan-mode",
         choices=(PLAN_MODE_BLACKLIST, PLAN_MODE_WHITELIST),
         default=PLAN_MODE_BLACKLIST,
         help=(
-            "导出计划模式：blacklist=只有 export=0 跳过；"
-            "whitelist=只有 export=1 导出"
+            "Export plan mode: blacklist=skip only rows with export=0; "
+            "whitelist=export only rows with export=1"
         ),
     )
     parser.add_argument(
         "--size-mode",
         choices=("estimate", "scan"),
         default="estimate",
-        help="生成计划 CSV 时的大小统计方式：estimate=快估，scan=尝试扫描本地附件",
+        help="Size calculation method when generating a plan CSV: estimate=quick estimate, scan=attempt to scan local attachments",
     )
     parser.add_argument(
         "-i",
         "--incremental",
         action="store_true",
-        help="增量导出：只追加新消息到已有 JSON 文件",
+        help="Incremental export: only append new messages to existing JSON files",
     )
     parser.add_argument(
         "--delta-only",
         action="store_true",
-        help="只导出 --start/--end 时间窗口内的增量 delta JSON，不读取或覆盖已有完整 JSON",
+        help="Only export incremental delta JSON within the --start/--end time window, without reading or overwriting existing full JSON files",
     )
     parser.add_argument(
         "--start",
         default=None,
-        help="起始日期 (如 2025-01-01 或 Unix 时间戳)",
+        help="Start date (e.g. 2025-01-01 or a Unix timestamp)",
     )
     parser.add_argument(
         "--end",
         default=None,
-        help="结束日期 (如 2025-01-31 或 Unix 时间戳)",
+        help="End date (e.g. 2025-01-31 or a Unix timestamp)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="预览模式：显示将导出的会话，不实际写入",
+        help="Dry-run mode: display sessions that would be exported without actually writing",
     )
     parser.add_argument(
         "--users",
         default=None,
-        help="只导出指定 username 的会话, 逗号分隔 (如 wxid_xxx,12345@chatroom). "
-             "为空时导出全部 (旧行为). 也可用 env WECHAT_EXPORT_USERS",
+        help="Only export sessions for the specified usernames, comma-separated (e.g. wxid_xxx,12345@chatroom). "
+             "Exports all when empty (legacy behavior). Can also be set via env WECHAT_EXPORT_USERS",
     )
     args = parser.parse_args(argv)
 
     if args.write_plan_csv and args.from_plan_csv:
-        parser.error("--write-plan-csv 和 --from-plan-csv 只能使用一个")
+        parser.error("--write-plan-csv and --from-plan-csv cannot be used together")
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_dir = args.output_dir or os.path.join(script_dir, "exported_chats")
@@ -1521,12 +1521,12 @@ def main(argv=None):
     start_ts = _parse_timestamp(args.start) if args.start else None
     end_ts = _parse_timestamp(args.end) if args.end else None
     if args.start and start_ts is None:
-        print(f"错误: 无法解析起始时间: {args.start}", file=sys.stderr)
-        print("支持格式: 2025-01-01, 2025-01-01 14:30, 2025-01-01T14:30:00", file=sys.stderr)
+        print(f"Error: Cannot parse start time: {args.start}", file=sys.stderr)
+        print("Supported formats: 2025-01-01, 2025-01-01 14:30, 2025-01-01T14:30:00", file=sys.stderr)
         sys.exit(1)
     if args.end and end_ts is None:
-        print(f"错误: 无法解析结束时间: {args.end}", file=sys.stderr)
-        print("支持格式: 2025-01-01, 2025-01-01 14:30, 2025-01-01T14:30:00", file=sys.stderr)
+        print(f"Error: Cannot parse end time: {args.end}", file=sys.stderr)
+        print("Supported formats: 2025-01-01, 2025-01-01 14:30, 2025-01-01T14:30:00", file=sys.stderr)
         sys.exit(1)
     if args.delta_only and start_ts is None:
         parser.error("--delta-only requires --start to avoid accidental full export")
@@ -1534,31 +1534,31 @@ def main(argv=None):
     if args.with_transcriptions:
         try:
             backend = _resolve_backend()
-            print(f"语音转录: 启用 (backend={backend})")
+            print(f"Voice transcription: enabled (backend={backend})")
         except Exception as e:
-            print(f"语音转录: backend 解析失败: {e}", file=sys.stderr)
+            print(f"Voice transcription: backend resolution failed: {e}", file=sys.stderr)
             args.with_transcriptions = False
 
     if not os.path.exists(mcp_server.DECRYPTED_DIR):
-        print(f"错误: 解密目录不存在: {mcp_server.DECRYPTED_DIR}", file=sys.stderr)
+        print(f"Error: Decrypted directory does not exist: {mcp_server.DECRYPTED_DIR}", file=sys.stderr)
         sys.exit(1)
 
     session_db = os.path.join(mcp_server.DECRYPTED_DIR, "session", "session.db")
     try:
         sessions = _load_session_usernames(session_db)
     except sqlite3.Error as e:
-        print(f"会话数据库查询失败: {e}", file=sys.stderr)
+        print(f"Session database query failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # username 白名单过滤 (--users 参数 / WECHAT_EXPORT_USERS 环境变量)
+    # Username whitelist filter (--users argument / WECHAT_EXPORT_USERS environment variable)
     users_filter_raw = args.users or os.environ.get("WECHAT_EXPORT_USERS", "")
     if users_filter_raw.strip():
         wanted = {u.strip() for u in users_filter_raw.split(",") if u.strip()}
         before = len(sessions)
         sessions = [u for u in sessions if u in wanted]
-        print(f"按 --users 过滤: {before} → {len(sessions)} 会话")
+        print(f"Filtered by --users: {before} -> {len(sessions)} sessions")
         if not sessions:
-            print(f"[!] 指定的 username 列表跟会话表没交集 (wanted={list(wanted)[:5]}...)",
+            print(f"[!] The specified username list has no intersection with the session table (wanted={list(wanted)[:5]}...)",
                   file=sys.stderr)
             sys.exit(1)
 
@@ -1566,27 +1566,27 @@ def main(argv=None):
     contact_full = mcp_server.get_contact_full()
     chat_rows = _build_chat_rows(sessions, names, contact_full)
 
-    # 显示模式信息
+    # Display mode information
     mode = ""
     if args.delta_only:
-        mode = "Delta 增量导出"
+        mode = "Delta incremental export"
     elif args.incremental:
-        mode = "增量模式"
+        mode = "Incremental mode"
     if start_ts:
         start_dt = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d %H:%M")
-        mode += f" 起始={start_dt}"
+        mode += f" start={start_dt}"
     if end_ts:
         end_dt = datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d %H:%M")
-        mode += f" 结束={end_dt}"
+        mode += f" end={end_dt}"
     if not mode:
-        mode = "全量模式"
+        mode = "Full mode"
     if args.dry_run:
-        mode += " (预览)"
+        mode += " (dry run)"
 
-    print(f"会话总数: {len(sessions)}")
-    print(f"联系人映射: {len(names)}")
-    print(f"输出目录: {output_dir}")
-    print(f"模式: {mode}")
+    print(f"Total sessions: {len(sessions)}")
+    print(f"Contact mappings: {len(names)}")
+    print(f"Output directory: {output_dir}")
+    print(f"Mode: {mode}")
     print("=" * 60)
 
     if args.write_plan_csv:
@@ -1600,16 +1600,16 @@ def main(argv=None):
             _write_plan_csv(args.write_plan_csv, rows, plan_mode=args.plan_mode)
         except OSError as e:
             print(
-                f"写入导出计划 CSV 失败: {e}\n"
-                "请确认目标文件没有被 Excel/WPS 打开，或换一个输出文件名。",
+                f"Failed to write export plan CSV: {e}\n"
+                "Please ensure the target file is not open in Excel/WPS, or choose a different output filename.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        print(f"已生成导出计划 CSV: {args.write_plan_csv}")
+        print(f"Export plan CSV generated: {args.write_plan_csv}")
         if args.plan_mode == PLAN_MODE_WHITELIST:
-            print("白名单模式：请在 export 列填写 1 后，使用 --from-plan-csv 导出。")
+            print("Whitelist mode: set export=1 for the rows you want to export, then use --from-plan-csv.")
         else:
-            print("黑名单模式：请将不导出的行改为 export=0，再使用 --from-plan-csv 导出。")
+            print("Blacklist mode: set export=0 for rows you want to skip, then use --from-plan-csv.")
         return
 
     if args.from_plan_csv:
@@ -1620,18 +1620,18 @@ def main(argv=None):
                 plan_mode=args.plan_mode,
             )
         except (OSError, ValueError) as e:
-            print(f"读取导出计划 CSV 失败: {e}", file=sys.stderr)
+            print(f"Failed to read export plan CSV: {e}", file=sys.stderr)
             sys.exit(1)
         if not sessions:
-            print("未选择任何会话，已取消。")
+            print("No sessions selected, cancelled.")
             return
 
     if args.from_plan_csv:
-        print(f"本次选择: {len(sessions)} 个会话")
+        print(f"Selected for this run: {len(sessions)} sessions")
         print("=" * 60)
 
     if args.dry_run:
-        print("预览模式：未写入任何导出文件。")
+        print("Dry-run mode: no export files were written.")
         return
 
     os.makedirs(output_dir, exist_ok=True)
@@ -1646,7 +1646,7 @@ def main(argv=None):
     for i, username in enumerate(sessions, 1):
         display = names.get(username, username)
         chat_t0 = time.time()
-        print(f"[{i}/{total_sessions}] 开始导出: {display} ({username})", flush=True)
+        print(f"[{i}/{total_sessions}] Starting export: {display} ({username})", flush=True)
         if args.delta_only:
             result = export_delta_one(
                 username=username,
@@ -1677,8 +1677,8 @@ def main(argv=None):
             if args.delta_only and result.get("skipped"):
                 skip += 1
                 print(
-                    f"[{i}/{total_sessions}] 跳过: {display} ({reason}) "
-                    f"(本会话 {chat_elapsed:.1f}s, ETA {eta/60:.1f}分)",
+                    f"[{i}/{total_sessions}] Skipped: {display} ({reason}) "
+                    f"(session {chat_elapsed:.1f}s, ETA {eta/60:.1f}min)",
                     flush=True,
                 )
                 continue
@@ -1691,8 +1691,8 @@ def main(argv=None):
             else:
                 label = f"{total_msgs} msgs"
             print(
-                f"[{i}/{total_sessions}] 完成导出: {display} - {label} "
-                f"(本会话 {chat_elapsed:.1f}s, ETA {eta/60:.1f}分)",
+                f"[{i}/{total_sessions}] Done: {display} - {label} "
+                f"(session {chat_elapsed:.1f}s, ETA {eta/60:.1f}min)",
                 flush=True,
             )
         else:
@@ -1702,8 +1702,8 @@ def main(argv=None):
                 chat_elapsed = time.time() - chat_t0
                 eta = (elapsed / i) * (total_sessions - i) if i > 0 else 0
                 print(
-                    f"[{i}/{total_sessions}] 跳过: {display} ({reason}) "
-                    f"(本会话 {chat_elapsed:.1f}s, ETA {eta/60:.1f}分)",
+                    f"[{i}/{total_sessions}] Skipped: {display} ({reason}) "
+                    f"(session {chat_elapsed:.1f}s, ETA {eta/60:.1f}min)",
                     flush=True,
                 )
             else:
@@ -1712,8 +1712,8 @@ def main(argv=None):
                 chat_elapsed = time.time() - chat_t0
                 eta = (elapsed / i) * (total_sessions - i) if i > 0 else 0
                 print(
-                    f"[{i}/{total_sessions}] 失败: {display} - {reason} "
-                    f"(本会话 {chat_elapsed:.1f}s, ETA {eta/60:.1f}分)",
+                    f"[{i}/{total_sessions}] Failed: {display} - {reason} "
+                    f"(session {chat_elapsed:.1f}s, ETA {eta/60:.1f}min)",
                     flush=True,
                 )
 
@@ -1731,10 +1731,10 @@ def main(argv=None):
     elapsed = time.time() - t0
     print()
     print("=" * 60)
-    extra = f" (新增 {total_new} 条)" if args.incremental and total_new > 0 else ""
+    extra = f" (+{total_new} new)" if args.incremental and total_new > 0 else ""
     print(
-        f"完成! 成功={ok} 跳过={skip} 失败={err} "
-        f"总消息={total}{extra} 耗时={elapsed/60:.1f}分"
+        f"Done! success={ok} skipped={skip} failed={err} "
+        f"total_messages={total}{extra} elapsed={elapsed/60:.1f}min"
     )
 
 

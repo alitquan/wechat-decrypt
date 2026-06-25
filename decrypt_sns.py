@@ -1,8 +1,8 @@
-"""解密微信朋友圈图片缓存
-来源1: WeChat Files/FileStorage/Sns/Cache/<YYYY-MM>/<hash>[_t|_d]
-来源2: xwechat_files/cache/<YYYY-MM>/Sns/Img/<hex>/<hash>
-输出目录: <output_base_dir>/朋友圈图片/<YYYY-MM>/
-_t 后缀为缩略图（跳过）
+"""Decrypt WeChat Moments (SNS) image cache
+Source 1: WeChat Files/FileStorage/Sns/Cache/<YYYY-MM>/<hash>[_t|_d]
+Source 2: xwechat_files/cache/<YYYY-MM>/Sns/Img/<hex>/<hash>
+Output directory: <output_base_dir>/Moments Images/<YYYY-MM>/
+_t suffix = thumbnail (skipped)
 """
 import os
 import sys
@@ -18,7 +18,7 @@ from decode_image import aligned_aes_block_size
 _cfg = load_config()
 SNS_CACHE_DIR = _cfg.get("sns_cache_dir", "")
 XWECHAT_CACHE_DIR = _cfg.get("xwechat_cache_dir", "")
-OUTPUT_DIR = os.path.join(_cfg["output_base_dir"], "朋友圈图片")
+OUTPUT_DIR = os.path.join(_cfg["output_base_dir"], "Moments Images")
 IMAGE_AES_KEY = _cfg.get("image_aes_key")
 IMAGE_XOR_KEY = _cfg.get("image_xor_key", 0x88)
 
@@ -55,7 +55,7 @@ def _detect_format(header):
 
 
 def decrypt_dat(dat_path):
-    """解密单个 .dat 文件，返回 (bytes, format) 或 (None, None)"""
+    """Decrypt a single .dat file, returns (bytes, format) or (None, None)"""
     with open(dat_path, 'rb') as f:
         data = f.read()
     if len(data) < 6:
@@ -63,7 +63,7 @@ def decrypt_dat(dat_path):
 
     head6 = data[:6]
 
-    # V2 / V1 格式
+    # V2 / V1 format
     if head6 in (_V2_MAGIC_FULL, _V1_MAGIC_FULL):
         if head6 == _V1_MAGIC_FULL:
             aes_key = b'cfcd208495d565ef'
@@ -95,10 +95,10 @@ def decrypt_dat(dat_path):
             fmt = _detect_format(result[:16])
             return result, fmt
         except Exception as e:
-            print(f"  AES 解密失败: {e}")
+            print(f"  AES decryption failed: {e}")
             return None, None
 
-    # 旧 XOR 格式
+    # Legacy XOR format
     for fmt_name, magic in _IMAGE_MAGICS.items():
         key = data[0] ^ magic[0]
         match = all(i < len(data) and (data[i] ^ key) == magic[i] for i in range(len(magic)))
@@ -111,8 +111,8 @@ def decrypt_dat(dat_path):
 
 
 def _collect_xwechat_sns_files():
-    """收集 xwechat cache/<YYYY-MM>/Sns/Img/<hex>/ 下的所有文件
-    返回 {month: [(file_path, basename), ...], ...}
+    """Collect all files under xwechat cache/<YYYY-MM>/Sns/Img/<hex>/
+    Returns {month: [(file_path, basename), ...], ...}
     """
     result = {}
     if not XWECHAT_CACHE_DIR or not os.path.isdir(XWECHAT_CACHE_DIR):
@@ -151,13 +151,13 @@ def main():
     has_xwechat = XWECHAT_CACHE_DIR and os.path.isdir(XWECHAT_CACHE_DIR)
 
     if not has_wechat and not has_xwechat:
-        print(f"朋友圈缓存目录不存在:")
+        print(f"Moments cache directory not found:")
         print(f"  WeChat Files: {SNS_CACHE_DIR}")
         print(f"  xwechat:      {XWECHAT_CACHE_DIR}")
-        print("请确认 config.json 中的路径配置正确")
+        print("Please verify the path configuration in config.json")
         return
 
-    print(f"输出目录: {OUTPUT_DIR}")
+    print(f"Output directory: {OUTPUT_DIR}")
 
     total = 0
     success = 0
@@ -165,15 +165,15 @@ def main():
     skipped_exist = 0
     failed = 0
 
-    # ── 来源1: WeChat Files/FileStorage/Sns/Cache/<YYYY-MM>/ ──
+    # ── Source 1: WeChat Files/FileStorage/Sns/Cache/<YYYY-MM>/ ──
     if has_wechat:
-        print(f"\n[来源1] WeChat Files: {SNS_CACHE_DIR}")
+        print(f"\n[Source 1] WeChat Files: {SNS_CACHE_DIR}")
         months = sorted(d for d in os.listdir(SNS_CACHE_DIR)
                         if os.path.isdir(os.path.join(SNS_CACHE_DIR, d)))
         has_month_dirs = any(len(m) == 7 and m[4] == '-' for m in months)
 
         if has_month_dirs:
-            print(f"  时间目录: {len(months)} 个")
+            print(f"  Month directories: {len(months)}")
             for month in months:
                 month_src = os.path.join(SNS_CACHE_DIR, month)
                 month_out = os.path.join(OUTPUT_DIR, month)
@@ -184,30 +184,30 @@ def main():
             stats = _process_dir_stats(SNS_CACHE_DIR, OUTPUT_DIR, "")
             total, success, skipped_thumb, skipped_exist, failed = stats
 
-    # ── 来源2: xwechat cache/<YYYY-MM>/Sns/Img/<hex>/ ──
+    # ── Source 2: xwechat cache/<YYYY-MM>/Sns/Img/<hex>/ ──
     if has_xwechat:
-        print(f"\n[来源2] xwechat: {XWECHAT_CACHE_DIR}")
+        print(f"\n[Source 2] xwechat: {XWECHAT_CACHE_DIR}")
         xw_files = _collect_xwechat_sns_files()
         if not xw_files:
-            print("  未找到 Sns/Img 文件")
+            print("  No Sns/Img files found")
         else:
-            print(f"  时间目录: {len(xw_files)} 个")
+            print(f"  Month directories: {len(xw_files)}")
             for month, file_list in sorted(xw_files.items()):
                 month_out = os.path.join(OUTPUT_DIR, month)
                 stats = _process_file_list(file_list, month_out, month)
                 total += stats[0]; success += stats[1]; skipped_thumb += stats[2]
                 skipped_exist += stats[3]; failed += stats[4]
 
-    print(f"\n完成: 共 {total} 个文件")
-    print(f"  成功解密: {success}")
-    print(f"  跳过缩略图(_t): {skipped_thumb}")
-    print(f"  跳过已存在: {skipped_exist}")
-    print(f"  解密失败: {failed}")
-    print(f"输出: {os.path.abspath(OUTPUT_DIR)}")
+    print(f"\nDone: {total} files total")
+    print(f"  Successfully decrypted: {success}")
+    print(f"  Skipped thumbnails (_t): {skipped_thumb}")
+    print(f"  Skipped (already exist): {skipped_exist}")
+    print(f"  Decryption failed: {failed}")
+    print(f"Output: {os.path.abspath(OUTPUT_DIR)}")
 
 
 def _process_dir_stats(src_dir, out_dir, label):
-    """处理一个目录中的所有文件，返回 (total, success, skipped_thumb, skipped_exist, failed)"""
+    """Process all files in a directory, returns (total, success, skipped_thumb, skipped_exist, failed)"""
     try:
         all_files = sorted(os.listdir(src_dir))
     except OSError:
@@ -219,7 +219,7 @@ def _process_dir_stats(src_dir, out_dir, label):
 
 
 def _process_file_list(file_list, out_dir, label):
-    """处理文件列表 [(file_path, basename), ...], 返回 (total, success, skipped_thumb, skipped_exist, failed)"""
+    """Process a file list [(file_path, basename), ...], returns (total, success, skipped_thumb, skipped_exist, failed)"""
     total = 0
     success = 0
     skipped_thumb = 0
@@ -230,22 +230,22 @@ def _process_file_list(file_list, out_dir, label):
         return (0, 0, 0, 0, 0)
 
     if label:
-        print(f"  [{label}] {len(file_list)} 个文件")
+        print(f"  [{label}] {len(file_list)} files")
 
     month_ok = 0
     for file_path, fname in file_list:
         total += 1
-        # 跳过缩略图
+        # Skip thumbnails
         if fname.endswith('_t'):
             skipped_thumb += 1
             continue
 
-        # 去掉 _d 后缀得到基础名
+        # Strip _d suffix to get base name
         base_name = fname
         if base_name.endswith('_d'):
             base_name = base_name[:-2]
 
-        # 检查是否已存在
+        # Check if output already exists
         existing = glob.glob(os.path.join(out_dir, f"{base_name}.*"))
         if existing:
             skipped_exist += 1
@@ -264,7 +264,7 @@ def _process_file_list(file_list, out_dir, label):
         month_ok += 1
 
     if month_ok > 0 and label:
-        print(f"    解密成功: {month_ok} 张")
+        print(f"    Successfully decrypted: {month_ok} images")
 
     return (total, success, skipped_thumb, skipped_exist, failed)
 

@@ -1,11 +1,11 @@
 """
-WeChat Decrypt 一键启动
+WeChat Decrypt One-Click Launcher
 
-python main.py               # 提取密钥 + 启动 Web UI
-python main.py decrypt       # 提取密钥 + 解密全部数据库
-python main.py export        # 提取密钥 + 解密 + 批量导出聊天记录
-python main.py all           # 从零到完成：密钥 → 解密 → 导出
-python main.py status        # 显示当前数据状态
+python main.py               # Extract keys + launch Web UI
+python main.py decrypt       # Extract keys + decrypt all databases
+python main.py export        # Extract keys + decrypt + bulk export chat logs
+python main.py all           # End-to-end: keys → decrypt → export
+python main.py status        # Show current data status
 """
 
 import functools
@@ -22,7 +22,7 @@ from key_utils import strip_key_metadata
 
 
 def check_wechat_running():
-    """检查微信是否在运行，返回 True/False"""
+    """Check whether WeChat is running; returns True/False."""
     if platform.system().lower() == "darwin":
         return subprocess.run(["pgrep", "-x", "WeChat"], capture_output=True).returncode == 0
     from find_all_keys import get_pids
@@ -34,10 +34,10 @@ def check_wechat_running():
 
 
 def _run_decode_images(cfg, argv):
-    """`decode-images` 子命令:批量把 .dat 图片解密成明文图片树。
+    """`decode-images` subcommand: bulk-decrypt .dat images into a plaintext image tree.
 
-    与 decrypt 不同,decode-images **不需要** 微信进程在运行,也不需要 DB 密钥
-    (只读已存在的 .dat 文件;V2 文件用 config.json 里的 image_aes_key)。
+    Unlike decrypt, decode-images does **not** require WeChat to be running or a DB key
+    (it only reads existing .dat files; V2 files use image_aes_key from config.json).
     """
     import argparse
     from decode_image import decode_all_dats
@@ -45,9 +45,10 @@ def _run_decode_images(cfg, argv):
     parser = argparse.ArgumentParser(
         prog="main.py decode-images",
         description=(
-            "批量解密微信本地 .dat 图片到明文图片树。"
-            "区别于 decode_image.py 单文件 CLI,本子命令扫描 attach_dir 下"
-            "全部 .dat,镜像目录结构产出明文(jpg / png / gif / webp / hevc)。"
+            "Bulk-decrypt WeChat local .dat images into a plaintext image tree. "
+            "Unlike the single-file decode_image.py CLI, this subcommand scans all "
+            ".dat files under attach_dir and mirrors the directory structure, "
+            "producing plaintext output (jpg / png / gif / webp / hevc)."
         ),
     )
     default_base = cfg.get("wechat_base_dir") or os.path.dirname(cfg["db_dir"])
@@ -55,23 +56,23 @@ def _run_decode_images(cfg, argv):
     default_out = cfg.get("decoded_image_dir", "decoded_images")
     parser.add_argument(
         "--attach-dir", default=None,
-        help=f"微信 msg/attach 根目录,覆盖默认推断(默认: {default_attach})",
+        help=f"WeChat msg/attach root directory, overrides default inference (default: {default_attach})",
     )
     parser.add_argument(
         "--decoded-dir", default=None,
-        help=f"明文图片输出根目录,覆盖 config.json 的 decoded_image_dir(默认: {default_out})",
+        help=f"Plaintext image output root directory, overrides decoded_image_dir in config.json (default: {default_out})",
     )
     parser.add_argument(
         "--aes-key", default=None,
-        help="V2 AES key(16 字节 ASCII 字符串),覆盖 config.json 的 image_aes_key",
+        help="V2 AES key (16-byte ASCII string), overrides image_aes_key in config.json",
     )
     parser.add_argument(
         "--xor-key", default=None,
-        help="V2 XOR key(可十进制或 0x 十六进制),覆盖 config.json 的 image_xor_key(默认: 0x88)",
+        help="V2 XOR key (decimal or 0x hex), overrides image_xor_key in config.json (default: 0x88)",
     )
     parser.add_argument(
         "--force", action="store_true",
-        help="忽略已存在目标重新解密(默认按 basename 跳过)",
+        help="Re-decrypt even if output already exists (default: skip by basename)",
     )
     args = parser.parse_args(argv)
 
@@ -85,19 +86,19 @@ def _run_decode_images(cfg, argv):
         xor_key = xor_key_raw
 
     if not os.path.isdir(attach_dir):
-        print(f"[ERROR] attach 目录不存在: {attach_dir}", file=sys.stderr)
+        print(f"[ERROR] attach directory does not exist: {attach_dir}", file=sys.stderr)
         sys.exit(1)
 
     if aes_key is None:
         print(
-            "[NOTE] 未配置 image_aes_key,V2 加密图片将被跳过(计入 skipped_no_key);"
-            "V1 / 老 XOR 图片不受影响。提取 V2 key 见 README 的图片解密章节。",
+            "[NOTE] image_aes_key not configured; V2 encrypted images will be skipped (counted as skipped_no_key). "
+            "V1 / legacy XOR images are unaffected. See the image decryption section in the README for how to extract the V2 key.",
             file=sys.stderr,
         )
 
     print(f"  attach_dir = {attach_dir}")
     print(f"  out_dir    = {out_dir}")
-    print(f"  aes_key    = {'已配置' if aes_key else '未配置'}")
+    print(f"  aes_key    = {'configured' if aes_key else 'not configured'}")
     print(f"  xor_key    = 0x{xor_key:02x}")
     print(f"  force      = {args.force}")
     print()
@@ -112,20 +113,20 @@ def _run_decode_images(cfg, argv):
 
     print()
     print("=" * 60)
-    print(f"扫描 {stats['total']} 个 .dat 文件")
-    print(f"  解码: {stats['decoded']}  跳过(已存在): {stats['skipped']}  "
-          f"无 key 跳过: {stats['skipped_no_key']}  失败: {stats['failed']}")
+    print(f"Scanned {stats['total']} .dat files")
+    print(f"  Decoded: {stats['decoded']}  Skipped (already exists): {stats['skipped']}  "
+          f"Skipped (no key): {stats['skipped_no_key']}  Failed: {stats['failed']}")
     if stats["formats"]:
         fmt_summary = ", ".join(f"{ext}={n}" for ext, n in sorted(stats["formats"].items()))
-        print(f"  按格式: {fmt_summary}")
-    print(f"输出在: {out_dir}")
+        print(f"  By format: {fmt_summary}")
+    print(f"Output at: {out_dir}")
 
     if stats["failed"] > 0:
         sys.exit(2)
 
 
 def ensure_keys(keys_file, db_dir):
-    """确保密钥文件存在且匹配当前 db_dir，否则重新提取"""
+    """Ensure the keys file exists and matches the current db_dir; re-extract if not."""
     if os.path.exists(keys_file):
         try:
             with open(keys_file, encoding="utf-8") as f:
@@ -134,27 +135,27 @@ def ensure_keys(keys_file, db_dir):
             keys = {}
         saved_dir = keys.pop("_db_dir", None)
         if saved_dir and os.path.normcase(os.path.normpath(saved_dir)) != os.path.normcase(os.path.normpath(db_dir)):
-            print(f"[!] 密钥文件对应的目录已变更，需要重新提取")
-            print(f"    旧: {saved_dir}")
-            print(f"    新: {db_dir}")
+            print(f"[!] The directory associated with the keys file has changed; re-extraction required")
+            print(f"    Old: {saved_dir}")
+            print(f"    New: {db_dir}")
             keys = {}
         keys = strip_key_metadata(keys)
         if keys:
-            print(f"[+] 已有 {len(keys)} 个数据库密钥")
+            print(f"[+] {len(keys)} database keys already present")
             return
 
-    print("[*] 密钥文件不存在，正在从微信进程提取...")
+    print("[*] Keys file not found; extracting from WeChat process...")
     print()
     from find_all_keys import main as extract_keys
     try:
         extract_keys()
     except RuntimeError as e:
-        print(f"\n[!] 密钥提取失败: {e}")
+        print(f"\n[!] Key extraction failed: {e}")
         sys.exit(1)
     print()
 
     if not os.path.exists(keys_file):
-        print("[!] 密钥提取失败")
+        print("[!] Key extraction failed")
         sys.exit(1)
     try:
         with open(keys_file, encoding="utf-8") as f:
@@ -162,17 +163,17 @@ def ensure_keys(keys_file, db_dir):
     except (json.JSONDecodeError, ValueError):
         keys = {}
     if not strip_key_metadata(keys):
-        print("[!] 未能提取到任何密钥")
-        print("    可能原因：选择了错误的微信数据目录，或微信需要重启")
-        print("    请检查 config.json 中的 db_dir 是否与当前登录的微信账号匹配")
+        print("[!] No keys could be extracted")
+        print("    Possible causes: wrong WeChat data directory selected, or WeChat needs a restart")
+        print("    Please verify that db_dir in config.json matches the currently logged-in WeChat account")
         sys.exit(1)
 
 
 def show_status():
-    """显示当前数据状态"""
+    """Show current data status."""
     cfg = {}
-    # 走 config._config_file_path() 而不是硬编码 "config.json"
-    # 这样打包成 exe 后 (cwd 可能任意位置) 仍能找到正确的 config
+    # Use config._config_file_path() instead of hard-coding "config.json"
+    # so that when packaged as an exe (cwd may be arbitrary) the correct config is still found
     from config import _config_file_path
     config_file = _config_file_path()
     if os.path.exists(config_file):
@@ -181,10 +182,10 @@ def show_status():
         print(f"[config] {config_file}")
         print(f"         db_dir = {cfg.get('db_dir', '?')}")
     else:
-        print(f"[config] 未找到 {config_file}")
+        print(f"[config] {config_file} not found")
 
     keys_files = sorted(glob.glob("all_keys*.json"))
-    print(f"[keys]   {len(keys_files)} 个密钥文件")
+    print(f"[keys]   {len(keys_files)} keys file(s)")
     for kf in keys_files:
         sz = os.path.getsize(kf) / 1024
         print(f"         {kf} ({sz:.0f} KB)")
@@ -193,15 +194,15 @@ def show_status():
     if os.path.exists(decrypted_dir):
         dbs = glob.glob(os.path.join(decrypted_dir, "**/*.db"), recursive=True)
         total_mb = sum(os.path.getsize(f) for f in dbs) / 1024 / 1024
-        print(f"[decrypt] {len(dbs)} 个数据库 ({total_mb:.0f} MB)")
-        # 检查是否有消息内容（约略估计是否已导出）
+        print(f"[decrypt] {len(dbs)} database(s) ({total_mb:.0f} MB)")
+        # Check whether message databases are present (rough indicator of whether export has been done)
         for db in dbs:
             if "message" in os.path.basename(db):
                 sz = os.path.getsize(db) / 1024 / 1024
-                print(f"          消息库: {len([d for d in dbs if 'message' in d])} 个 ({sz:.0f} MB)")
+                print(f"          Message DB(s): {len([d for d in dbs if 'message' in d])} ({sz:.0f} MB)")
                 break
     else:
-        print("[decrypt] 未解密 (运行: python main.py decrypt)")
+        print("[decrypt] Not decrypted (run: python main.py decrypt)")
 
     exported_dir = "exported_chats"
     if os.path.exists(exported_dir):
@@ -209,9 +210,9 @@ def show_status():
                  if not f.endswith("_transcribed.json")]
         tx_jsons = glob.glob(os.path.join(exported_dir, "*_transcribed.json"))
         total_sz = sum(os.path.getsize(f) for f in jsons) / 1024 / 1024
-        print(f"[export]  {len(jsons)} 个 JSON ({total_sz:.0f} MB)")
+        print(f"[export]  {len(jsons)} JSON file(s) ({total_sz:.0f} MB)")
     else:
-        print("[export]  未导出 (运行: python main.py export)")
+        print("[export]  Not exported (run: python main.py export)")
 
     if os.path.exists(exported_dir):
         total_voice = 0
@@ -237,37 +238,37 @@ def show_status():
                             total_tx += 1
         if total_voice > 0:
             pct = total_tx * 100 // max(total_voice, 1)
-            print(f"[transcribe] {total_tx}/{total_voice} ({pct}%) 条语音已转录")
+            print(f"[transcribe] {total_tx}/{total_voice} ({pct}%) voice messages transcribed")
 
-    # 建议的下一步
+    # Suggested next steps
     print()
     steps = []
     if not os.path.exists(decrypted_dir):
-        steps.append("python main.py decrypt  — 解密数据库")
+        steps.append("python main.py decrypt  — decrypt databases")
     elif not os.path.exists(exported_dir):
-        steps.append("main.py export — 导出聊天记录")
+        steps.append("main.py export — export chat logs")
     if steps:
-        print("建议的下一步:")
+        print("Suggested next steps:")
         for s in steps:
             print(f"  {s}")
     else:
-        print("所有步骤已完成。")
+        print("All steps complete.")
 
 
 def print_usage():
-    print("用法:")
-    print("  python main.py                启动实时消息监听 (Web UI)")
-    print("  python main.py decrypt        解密全部数据库到 decrypted/")
-    print("  python main.py decode-images  批量解密 .dat 图片到 decoded_image_dir/")
-    print("  python main.py decode-images --help  查看 decode-images 全部选项")
-    print("  python main.py export         解密 + 批量导出聊天记录")
-    print("  python main.py all            从零到完成：密钥 → 解密 → 导出")
-    print("  python main.py emoticons      导出收藏的表情包")
-    print("  python main.py status         显示当前状态和磁盘用量")
+    print("Usage:")
+    print("  python main.py                Start live message monitoring (Web UI)")
+    print("  python main.py decrypt        Decrypt all databases to decrypted/")
+    print("  python main.py decode-images  Bulk-decrypt .dat images to decoded_image_dir/")
+    print("  python main.py decode-images --help  Show all decode-images options")
+    print("  python main.py export         Decrypt + bulk export chat logs")
+    print("  python main.py all            End-to-end: keys → decrypt → export")
+    print("  python main.py emoticons      Export saved emoticons/stickers")
+    print("  python main.py status         Show current status and disk usage")
 
 
 def _call_with_argv(func, argv):
-    """调用子命令 main() 时临时隔离 sys.argv，避免 argparse 读到外层命令。"""
+    """Temporarily isolate sys.argv when calling a subcommand's main(), so argparse does not see outer arguments."""
     old_argv = sys.argv[:]
     try:
         sys.argv = argv
@@ -284,7 +285,7 @@ def main():
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "web"
 
-    # help / status 不需要密钥和微信进程
+    # help / status do not require keys or a running WeChat process
     if cmd in ("help", "-h", "--help"):
         print_usage()
         return
@@ -292,39 +293,39 @@ def main():
         show_status()
         return
 
-    # 以下命令需要配置 + 微信进程
+    # The following commands require config + a running WeChat process
     from config import load_config
     cfg = load_config()
 
-    # 早路由:decode-images 不需要微信进程在运行,也不需要 DB 密钥
+    # Early route: decode-images does not require WeChat to be running or a DB key
     if len(sys.argv) > 1 and sys.argv[1] == "decode-images":
-        print("[*] 批量解密图片...")
+        print("[*] Bulk-decrypting images...")
         print()
         _run_decode_images(cfg, sys.argv[2:])
         return
 
-    # 2. 检查微信进程
+    # 2. Check for WeChat process
     if not check_wechat_running():
-        print(f"[!] 未检测到微信进程 ({cfg.get('wechat_process', 'WeChat')})")
-        print("    请先启动微信并登录，然后重新运行")
+        print(f"[!] WeChat process not detected ({cfg.get('wechat_process', 'WeChat')})")
+        print("    Please start WeChat and log in, then run again")
         sys.exit(1)
-    print("[+] 微信进程运行中")
+    print("[+] WeChat process is running")
 
     ensure_keys(cfg["keys_file"], cfg["db_dir"])
 
     if cmd == "decrypt":
-        print("[*] 开始解密全部数据库...")
+        print("[*] Starting decryption of all databases...")
         print()
         from decrypt_db import main as decrypt_all
         decrypt_all(sys.argv[2:])
 
     elif cmd in ("export", "all"):
-        print("[*] 开始解密全部数据库...")
+        print("[*] Starting decryption of all databases...")
         print()
         from decrypt_db import main as decrypt_all
         decrypt_all([])
         print()
-        print("[*] 开始批量导出聊天记录...")
+        print("[*] Starting bulk export of chat logs...")
         print()
         from export_all_chats import main as export_all
         try:
@@ -335,30 +336,30 @@ def main():
 
         if cmd == "all" and os.path.exists("exported_chats"):
             print()
-            print("[*] 检查语音转录配置...")
+            print("[*] Checking voice transcription configuration...")
             from config import load_config
             cfg2 = load_config()
             from mcp_server import _resolve_active_backend
             backend = _resolve_active_backend()
             if backend and backend != "local":
-                print(f"    检测到 backend = {backend}")
-                print("    如需转录语音，运行: python export_all_chats.py --with-transcriptions")
+                print(f"    Detected backend = {backend}")
+                print("    To transcribe voice messages, run: python export_all_chats.py --with-transcriptions")
             else:
-                print("    未配置语音转录 backend (config.json 中设置)")
-                print("    配置后运行: python export_all_chats.py --with-transcriptions")
+                print("    No voice transcription backend configured (set in config.json)")
+                print("    After configuring, run: python export_all_chats.py --with-transcriptions")
 
     elif cmd == "emoticons":
         from export_emoticons import main as export_emojis
         export_emojis()
 
     elif cmd == "web":
-        print("[*] 启动 Web UI...")
+        print("[*] Starting Web UI...")
         print()
         from monitor_web import main as start_web
         start_web()
 
     else:
-        print(f"[!] 未知命令: {cmd}")
+        print(f"[!] Unknown command: {cmd}")
         print()
         print_usage()
         sys.exit(1)
